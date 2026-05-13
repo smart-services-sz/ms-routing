@@ -1,0 +1,100 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model RoutingCategoryRule {
+  id           String   @id @default(uuid()) @db.Uuid
+  categoria    String   @unique
+  cupoDiario   Int
+  pesoPrioridad Int     @default(1)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model RoutingCrewRule {
+  id                 String   @id @default(uuid()) @db.Uuid
+  crewId             String   @unique
+  nombre             String?
+  maxReclamosDiarios Int
+  allowedCategorias  String[]
+  allowedZoneIds     String[]
+  startLat           Float?
+  startLng           Float?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model RoutingZoneRule {
+  id        String   @id
+  nombre    String?
+  minLat    Float
+  maxLat    Float
+  minLng    Float
+  maxLng    Float
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RoutingPlan {
+  id           String            @id @default(uuid()) @db.Uuid
+  planningDate DateTime
+  status       String            @default("proposed")
+  summary      Json
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  routes       RoutingRoute[]
+  unassigned   RoutingUnassigned[]
+
+  @@index([planningDate])
+}
+
+model RoutingRoute {
+  id                 String        @id @default(uuid()) @db.Uuid
+  planId             String        @db.Uuid
+  crewId             String
+  nombre             String
+  assignedClaims     Int
+  maxReclamosDiarios Int
+  totalDistanceKm    Float
+  totalDurationMin   Int
+  createdAt          DateTime      @default(now())
+  plan               RoutingPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  stops              RoutingStop[]
+
+  @@index([planId])
+}
+
+model RoutingStop {
+  id                      String       @id @default(uuid()) @db.Uuid
+  routeId                 String       @db.Uuid
+  sequence                Int
+  reclamoId               String       @db.Uuid
+  categoria               String
+  prioridad               String
+  zoneId                  String?
+  lat                     Float
+  lng                     Float
+  direccion               String
+  distanceFromPreviousKm  Float
+  durationFromPreviousMin Int
+  createdAt               DateTime     @default(now())
+  route                   RoutingRoute @relation(fields: [routeId], references: [id], onDelete: Cascade)
+
+  @@index([routeId])
+  @@index([reclamoId])
+}
+
+model RoutingUnassigned {
+  id        String      @id @default(uuid()) @db.Uuid
+  planId    String      @db.Uuid
+  reclamoId String      @db.Uuid
+  reason    String
+  createdAt DateTime    @default(now())
+  plan      RoutingPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@index([planId])
+}
