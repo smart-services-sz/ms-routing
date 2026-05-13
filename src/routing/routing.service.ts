@@ -1,13 +1,16 @@
-import { HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { PrismaService } from '../prisma/prisma.service';
 import { SimulateRoutingDto } from './dto/simulate-routing.dto';
 import { UpsertRoutingRulesDto } from './dto/upsert-routing-rules.dto';
-import { ClaimPrioridad, ReclamoItem, SimulationSummary } from './routing.types';
+import { ClaimCategoria, ClaimPrioridad, ReclamoItem, SimulationSummary } from './routing.types';
 import { firstValueFrom, timeout } from 'rxjs';
 
 @Injectable()
 export class RoutingService {
+  private readonly logger = new Logger(RoutingService.name);
+  private readonly googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY ?? '';
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject('NATS_CLIENT') private readonly natsClient: ClientProxy,
@@ -219,11 +222,21 @@ export class RoutingService {
       categoryConsumption[claim.categoria] = consumed + 1;
     }
 
-    const routes = routeBuilders
+    let routes = routeBuilders
       .filter((r) => r.claims.length > 0)
       .map((builder) =>
         this.buildRoute(builder.crew, builder.claims, zoneByClaimId, payload.originLat, payload.originLng),
       );
+
+    let optimizedRoutes = 0;
+    let failedRoutes = 0;
+
+    if (useGoogleOptimization) {
+      const optimizedResult = await this.optimizeRoutesWithGoogle(routes, payload.originLat, payload.originLng);
+      routes = optimizedResult.routes;
+      optimizedRoutes = optimizedResult.optimizedRoutes;
+      failedRoutes = optimizedResult.failedRoutes;
+    }
 
     const totalAssigned = routes.reduce((acc, route) => acc + route.assignedClaims, 0);
 
@@ -236,8 +249,8 @@ export class RoutingService {
       categoryQuotaConsumption: categoryConsumption,
       googleOptimization: {
         enabled: useGoogleOptimization,
-        optimizedRoutes: 0,
-        failedRoutes: 0,
+        optimizedRoutes,
+        failedRoutes,
       },
     };
 
@@ -354,6 +367,158 @@ export class RoutingService {
       totalDistanceKm: Number(totalDistance.toFixed(3)),
       totalDurationMin: totalDuration,
       stops,
+    };
+  }
+
+  private async optimizeRoutesWithGoogle(
+    routes: Array<{
+      crewId: string;
+      nombre: string;
+      assignedClaims: number;
+      maxReclamosDiarios: number;
+      totalDistanceKm: number;
+      totalDurationMin: number;
+      stops: Array<{
+        sequence: number;
+        reclamoId: string;
+        categoria: ClaimCategoria;
+        prioridad: ClaimPrioridad;
+        zoneId: string | null;
+        lat: number;
+        lng: number;
+        direccion: string;
+        distanceFromPreviousKm: number;
+        durationFromPreviousMin: number;
+        createdAt: string;
+      }>;
+    }>,
+    originLat?: number,
+    originLng?: number,
+  ) {
+    if (!this.googleMapsApiKey.trim()) {
+      this.logger.warn('useGoogleOptimization=true pero falta GOOGLE_MAPS_API_KEY; se usa fallback local');
+      return { routes, optimizedRoutes: 0, failedRoutes: routes.length };
+    }
+
+    const optimizedRoutes: typeof routes = [];
+    let success = 0;
+    let failed = 0;
+
+    for (const route of routes) {
+      try {
+        const optimized = await this.optimizeSingleRouteWithGoogle(route, originLat, originLng);
+        optimizedRoutes.push(optimized);
+        success += 1;
+      } catch (error) {
+        failed += 1;
+        this.logger.warn(
+          `No se pudo optimizar ruta crewId=${route.crewId} con Google: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        optimizedRoutes.push(route);
+      }
+    }
+
+    return {
+      routes: optimizedRoutes,
+      optimizedRoutes: success,
+      failedRoutes: failed,
+    };
+  }
+
+  private async optimizeSingleRouteWithGoogle(
+    route: {
+      crewId: string;
+      nombre: string;
+      assignedClaims: number;
+      maxReclamosDiarios: number;
+      totalDistanceKm: number;
+      totalDurationMin: number;
+      stops: Array<{
+        sequence: number;
+        reclamoId: string;
+        categoria: ClaimCategoria;
+        prioridad: ClaimPrioridad;
+        zoneId: string | null;
+        lat: number;
+        lng: number;
+        direccion: string;
+        distanceFromPreviousKm: number;
+        durationFromPreviousMin: number;
+        createdAt: string;
+      }>;
+    },
+    originLat?: number,
+    originLng?: number,
+  ) {
+    if (route.stops.length <= 1) {
+      return route;
+    }
+
+    const startLat = originLat ?? route.stops[0].lat;
+    const startLng = originLng ?? route.stops[0].lng;
+
+    const waypoints = route.stops.map((s) => `${s.lat},${s.lng}`).join('|');
+    const directionsUrl =
+      'https://maps.googleapis.com/maps/api/directions/json?' +
+      `origin=${encodeURIComponent(`${startLat},${startLng}`)}` +
+      `&destination=${encodeURIComponent(`${startLat},${startLng}`)}` +
+      `&waypoints=${encodeURIComponent(`optimize:true|${waypoints}`)}` +
+      '&mode=driving' +
+      `&key=${encodeURIComponent(this.googleMapsApiKey)}`;
+
+    const response = await fetch(directionsUrl);
+    if (!response.ok) {
+      throw new Error(`Google Directions HTTP ${response.status}`);
+    }
+
+    const data = (await response.json()) as {
+      status?: string;
+      routes?: Array<{
+        waypoint_order?: number[];
+        legs?: Array<{
+          distance?: { value?: number };
+          duration?: { value?: number };
+        }>;
+      }>;
+    };
+
+    if (data.status !== 'OK' || !data.routes?.length) {
+      throw new Error(`Google Directions status=${data.status ?? 'unknown'}`);
+    }
+
+    const best = data.routes[0];
+    const order = best.waypoint_order ?? route.stops.map((_, idx) => idx);
+    const reorderedStops = order.map((idx, i) => ({
+      ...route.stops[idx],
+      sequence: i + 1,
+    }));
+
+    const legs = best.legs ?? [];
+    let totalDistanceKm = 0;
+    let totalDurationMin = 0;
+
+    const stopsWithMetrics = reorderedStops.map((stop, index) => {
+      const leg = legs[index];
+      const distanceMeters = leg?.distance?.value ?? 0;
+      const durationSeconds = leg?.duration?.value ?? 0;
+      const distanceKm = distanceMeters / 1000;
+      const durationMin = Math.max(0, Math.round(durationSeconds / 60));
+
+      totalDistanceKm += distanceKm;
+      totalDurationMin += durationMin;
+
+      return {
+        ...stop,
+        distanceFromPreviousKm: Number(distanceKm.toFixed(3)),
+        durationFromPreviousMin: durationMin,
+      };
+    });
+
+    return {
+      ...route,
+      stops: stopsWithMetrics,
+      totalDistanceKm: Number(totalDistanceKm.toFixed(3)),
+      totalDurationMin,
     };
   }
 
