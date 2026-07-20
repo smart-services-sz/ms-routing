@@ -4,6 +4,10 @@ import { RoutingService } from './routing.service';
 import { SimulateRoutingDto } from './dto/simulate-routing.dto';
 import { UpsertRoutingRulesDto } from './dto/upsert-routing-rules.dto';
 import { RoutingPlanIdDto } from './dto/routing-plan-id.dto';
+import { GetAssignedRouteDto } from './dto/get-assigned-route.dto';
+import { UpdateRouteStatusDto } from './dto/update-route-status.dto';
+import { RegisterInterventionDto } from './dto/register-intervention.dto';
+import { AttachInterventionEvidenceDto } from './dto/attach-intervention-evidence.dto';
 
 @Controller()
 export class RoutingController {
@@ -37,5 +41,25 @@ export class RoutingController {
   @MessagePattern('routing.plan.confirm')
   confirmPlan(@Payload() payload: RoutingPlanIdDto) {
     return this.routingService.confirmPlan(payload.id);
+  }
+
+  @MessagePattern('routing.assigned-route.get')
+  getAssignedRoute(@Payload() payload: GetAssignedRouteDto) {
+    return this.routingService.getAssignedRoute(payload);
+  }
+
+  @MessagePattern('routing.route.status.update')
+  updateRouteStatus(@Payload() payload: UpdateRouteStatusDto) {
+    return this.routingService.updateRouteStatus(payload);
+  }
+
+  @MessagePattern('routing.intervention.register')
+  registerIntervention(@Payload() payload: RegisterInterventionDto) {
+    return this.routingService.registerIntervention(payload);
+  }
+
+  @MessagePattern('routing.intervention.evidence.attach')
+  attachInterventionEvidence(@Payload() payload: AttachInterventionEvidenceDto) {
+    return this.routingService.attachInterventionEvidence(payload);
   }
 }

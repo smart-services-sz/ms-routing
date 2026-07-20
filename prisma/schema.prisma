@@ -57,6 +57,10 @@ model RoutingRoute {
   planId             String        @db.Uuid
   crewId             String
   nombre             String
+  status             String        @default("assigned")
+  assignedAt         DateTime      @default(now())
+  startedAt          DateTime?
+  completedAt        DateTime?
   assignedClaims     Int
   maxReclamosDiarios Int
   totalDistanceKm    Float
@@ -64,6 +68,7 @@ model RoutingRoute {
   createdAt          DateTime      @default(now())
   plan               RoutingPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
   stops              RoutingStop[]
+  interventions      RoutingIntervention[]
 
   @@index([planId])
 }
@@ -72,6 +77,8 @@ model RoutingStop {
   id                      String       @id @default(uuid()) @db.Uuid
   routeId                 String       @db.Uuid
   sequence                Int
+  status                  String       @default("pendiente")
+  visitedAt               DateTime?
   reclamoId               String       @db.Uuid
   categoria               String
   prioridad               String
@@ -83,9 +90,42 @@ model RoutingStop {
   durationFromPreviousMin Int
   createdAt               DateTime     @default(now())
   route                   RoutingRoute @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  intervention            RoutingIntervention?
 
   @@index([routeId])
   @@index([reclamoId])
+}
+
+model RoutingIntervention {
+  id          String                      @id @default(uuid()) @db.Uuid
+  routeId     String                      @db.Uuid
+  stopId      String                      @unique @db.Uuid
+  reclamoId   String                      @db.Uuid
+  result      String
+  observation String?
+  performedBy String?
+  performedAt DateTime
+  createdAt   DateTime                    @default(now())
+  updatedAt   DateTime                    @updatedAt
+  route       RoutingRoute                @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  stop        RoutingStop                 @relation(fields: [stopId], references: [id], onDelete: Cascade)
+  evidences   RoutingInterventionEvidence[]
+
+  @@index([routeId])
+  @@index([reclamoId])
+}
+
+model RoutingInterventionEvidence {
+  id             String              @id @default(uuid()) @db.Uuid
+  interventionId String              @db.Uuid
+  tipo           String
+  nombreArchivo  String
+  urlArchivo     String
+  descripcion    String?
+  createdAt      DateTime            @default(now())
+  intervention   RoutingIntervention @relation(fields: [interventionId], references: [id], onDelete: Cascade)
+
+  @@index([interventionId])
 }
 
 model RoutingUnassigned {

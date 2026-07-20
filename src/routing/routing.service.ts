@@ -3,7 +3,19 @@ import { ClientProxy } from '@nestjs/microservices';
 import { PrismaService } from '../prisma/prisma.service';
 import { SimulateRoutingDto } from './dto/simulate-routing.dto';
 import { UpsertRoutingRulesDto } from './dto/upsert-routing-rules.dto';
-import { ClaimCategoria, ClaimPrioridad, ReclamoItem, SimulationSummary } from './routing.types';
+import { GetAssignedRouteDto } from './dto/get-assigned-route.dto';
+import { UpdateRouteStatusDto } from './dto/update-route-status.dto';
+import { RegisterInterventionDto } from './dto/register-intervention.dto';
+import { AttachInterventionEvidenceDto } from './dto/attach-intervention-evidence.dto';
+import {
+  ClaimCategoria,
+  ClaimPrioridad,
+  InterventionResult,
+  ReclamoItem,
+  RoutingRouteStatus,
+  RoutingStopStatus,
+  SimulationSummary,
+} from './routing.types';
 import { firstValueFrom, timeout } from 'rxjs';
 
 @Injectable()
@@ -109,6 +121,14 @@ export class RoutingService {
             stops: {
               orderBy: { sequence: 'asc' },
             },
+            interventions: {
+              include: {
+                evidences: {
+                  orderBy: { createdAt: 'asc' },
+                },
+              },
+              orderBy: { createdAt: 'asc' },
+            },
           },
           orderBy: { createdAt: 'asc' },
         },
@@ -139,12 +159,243 @@ export class RoutingService {
       throw new HttpException('Plan de ruteo no encontrado', HttpStatus.NOT_FOUND);
     }
 
-    await this.prisma.routingPlan.update({
-      where: { id },
-      data: { status: 'confirmed' },
-    });
+    await this.prisma.$transaction([
+      this.prisma.routingPlan.update({
+        where: { id },
+        data: { status: 'confirmed' },
+      }),
+      this.prisma.routingRoute.updateMany({
+        where: { planId: id },
+        data: { status: 'assigned', assignedAt: new Date() },
+      }),
+    ]);
 
     return { status: 'ok', message: 'Plan confirmado correctamente' };
+  }
+
+  async getAssignedRoute(payload: GetAssignedRouteDto) {
+    const route = await this.prisma.routingRoute.findFirst({
+      where: {
+        crewId: payload.crewId,
+        status: {
+          in: ['assigned', 'in_progress'],
+        },
+        plan: payload.planningDate
+          ? {
+              planningDate: new Date(`${payload.planningDate}T00:00:00.000Z`),
+            }
+          : undefined,
+      },
+      include: {
+        plan: {
+          select: {
+            id: true,
+            planningDate: true,
+            status: true,
+          },
+        },
+        stops: {
+          orderBy: { sequence: 'asc' },
+          include: {
+            intervention: {
+              include: {
+                evidences: {
+                  orderBy: { createdAt: 'asc' },
+                },
+              },
+            },
+          },
+        },
+      },
+      orderBy: [{ plan: { planningDate: 'desc' } }, { createdAt: 'desc' }],
+    });
+
+    if (!route) {
+      throw new HttpException('No se encontro una ruta asignada para la cuadrilla indicada', HttpStatus.NOT_FOUND);
+    }
+
+    return {
+      status: 'ok',
+      data: route,
+    };
+  }
+
+  async updateRouteStatus(payload: UpdateRouteStatusDto) {
+    const route = await this.prisma.routingRoute.findUnique({
+      where: { id: payload.routeId },
+      select: {
+        id: true,
+        status: true,
+      },
+    });
+
+    if (!route) {
+      throw new HttpException('Ruta no encontrada', HttpStatus.NOT_FOUND);
+    }
+
+    const now = new Date();
+    const data: {
+      status: RoutingRouteStatus;
+      startedAt?: Date | null;
+      completedAt?: Date | null;
+    } = {
+      status: payload.status,
+    };
+
+    if (payload.status === 'in_progress') {
+      data.startedAt = route.status === 'in_progress' ? undefined : now;
+      data.completedAt = null;
+    }
+
+    if (payload.status === 'completed') {
+      data.completedAt = now;
+      if (route.status !== 'in_progress') {
+        data.startedAt = route.status === 'assigned' ? now : undefined;
+      }
+    }
+
+    if (payload.status === 'assigned') {
+      data.startedAt = null;
+      data.completedAt = null;
+    }
+
+    if (payload.status === 'cancelled') {
+      data.completedAt = now;
+    }
+
+    await this.prisma.routingRoute.update({
+      where: { id: payload.routeId },
+      data,
+    });
+
+    return {
+      status: 'ok',
+      message: 'Estado de ruta actualizado',
+    };
+  }
+
+  async registerIntervention(payload: RegisterInterventionDto) {
+    const stop = await this.prisma.routingStop.findUnique({
+      where: { id: payload.stopId },
+      include: {
+        route: true,
+      },
+    });
+
+    if (!stop) {
+      throw new HttpException('Punto de ruta no encontrado', HttpStatus.NOT_FOUND);
+    }
+
+    if (stop.routeId !== payload.routeId) {
+      throw new HttpException('El punto indicado no pertenece a la ruta', HttpStatus.BAD_REQUEST);
+    }
+
+    const now = new Date();
+    const nextStopStatus = this.resolveStopStatusByIntervention(payload.result);
+    const nextClaimStatus = this.resolveClaimStatusByIntervention(payload.result);
+
+    const intervention = await this.prisma.$transaction(async (tx) => {
+      const updatedIntervention = await tx.routingIntervention.upsert({
+        where: { stopId: payload.stopId },
+        create: {
+          routeId: payload.routeId,
+          stopId: payload.stopId,
+          reclamoId: stop.reclamoId,
+          result: payload.result,
+          observation: payload.observation,
+          performedBy: payload.performedBy,
+          performedAt: now,
+        },
+        update: {
+          result: payload.result,
+          observation: payload.observation,
+          performedBy: payload.performedBy,
+          performedAt: now,
+        },
+        include: {
+          evidences: {
+            orderBy: { createdAt: 'asc' },
+          },
+        },
+      });
+
+      await tx.routingStop.update({
+        where: { id: payload.stopId },
+        data: {
+          status: nextStopStatus,
+          visitedAt: now,
+        },
+      });
+
+      if (stop.route.status === 'assigned') {
+        await tx.routingRoute.update({
+          where: { id: stop.routeId },
+          data: {
+            status: 'in_progress',
+            startedAt: stop.route.startedAt ?? now,
+          },
+        });
+      }
+
+      const pendingStops = await tx.routingStop.count({
+        where: {
+          routeId: stop.routeId,
+          status: 'pendiente',
+        },
+      });
+
+      if (pendingStops === 0) {
+        await tx.routingRoute.update({
+          where: { id: stop.routeId },
+          data: {
+            status: 'completed',
+            completedAt: now,
+          },
+        });
+      }
+
+      return updatedIntervention;
+    });
+
+    await this.syncClaimFromIntervention(stop.reclamoId, nextClaimStatus, payload);
+
+    return {
+      status: 'ok',
+      message: 'Intervencion registrada correctamente',
+      data: intervention,
+    };
+  }
+
+  async attachInterventionEvidence(payload: AttachInterventionEvidenceDto) {
+    const intervention = await this.prisma.routingIntervention.findUnique({
+      where: { id: payload.interventionId },
+      select: {
+        id: true,
+        reclamoId: true,
+      },
+    });
+
+    if (!intervention) {
+      throw new HttpException('Intervencion no encontrada', HttpStatus.NOT_FOUND);
+    }
+
+    const evidence = await this.prisma.routingInterventionEvidence.create({
+      data: {
+        interventionId: payload.interventionId,
+        tipo: payload.tipo,
+        nombreArchivo: payload.nombreArchivo,
+        urlArchivo: payload.urlArchivo,
+        descripcion: payload.descripcion,
+      },
+    });
+
+    await this.syncClaimEvidenceObservation(intervention.reclamoId, payload, evidence.createdAt);
+
+    return {
+      status: 'ok',
+      message: 'Evidencia adjuntada correctamente',
+      data: evidence,
+    };
   }
 
   private async buildSimulation(payload: SimulateRoutingDto, forcePersist: boolean) {
@@ -557,6 +808,7 @@ export class RoutingService {
           create: routes.map((route) => ({
             crewId: route.crewId,
             nombre: route.nombre,
+            status: 'assigned',
             assignedClaims: route.assignedClaims,
             maxReclamosDiarios: route.maxReclamosDiarios,
             totalDistanceKm: route.totalDistanceKm,
@@ -564,6 +816,7 @@ export class RoutingService {
             stops: {
               create: route.stops.map((stop) => ({
                 sequence: stop.sequence,
+                status: 'pendiente',
                 reclamoId: stop.reclamoId,
                 categoria: stop.categoria,
                 prioridad: stop.prioridad,
@@ -587,6 +840,83 @@ export class RoutingService {
       },
       select: { id: true },
     });
+  }
+
+  private resolveStopStatusByIntervention(result: InterventionResult): RoutingStopStatus {
+    if (result === 'resuelto') {
+      return 'visitado';
+    }
+
+    if (result === 'no_corresponde') {
+      return 'omitido';
+    }
+
+    if (result === 'requiere_nueva_visita') {
+      return 'reprogramado';
+    }
+
+    return 'visitado';
+  }
+
+  private resolveClaimStatusByIntervention(
+    result: InterventionResult,
+  ): 'pendiente' | 'en_proceso' | 'resuelto' | 'rechazado' | 'cerrado' {
+    if (result === 'resuelto') {
+      return 'resuelto';
+    }
+
+    if (result === 'no_corresponde') {
+      return 'rechazado';
+    }
+
+    return 'en_proceso';
+  }
+
+  private async syncClaimFromIntervention(
+    reclamoId: string,
+    estado: 'pendiente' | 'en_proceso' | 'resuelto' | 'rechazado' | 'cerrado',
+    payload: RegisterInterventionDto,
+  ): Promise<void> {
+    const observationText = [
+      `Intervencion de ruta: ${payload.result}`,
+      payload.observation?.trim() ? `Detalle: ${payload.observation.trim()}` : null,
+      payload.performedBy?.trim() ? `Ejecutado por: ${payload.performedBy.trim()}` : null,
+    ]
+      .filter(Boolean)
+      .join(' | ');
+
+    await firstValueFrom(
+      this.natsClient
+        .send('reclamos.update', {
+          id: reclamoId,
+          data: {
+            estado,
+            observaciones: observationText,
+          },
+        })
+        .pipe(timeout(12000)),
+    );
+  }
+
+  private async syncClaimEvidenceObservation(
+    reclamoId: string,
+    payload: AttachInterventionEvidenceDto,
+    createdAt: Date,
+  ): Promise<void> {
+    const observation =
+      `Evidencia adjuntada (${payload.tipo}) - ${payload.nombreArchivo} - ` +
+      `${payload.urlArchivo} - ${createdAt.toISOString()}`;
+
+    await firstValueFrom(
+      this.natsClient
+        .send('reclamos.update', {
+          id: reclamoId,
+          data: {
+            observaciones: observation,
+          },
+        })
+        .pipe(timeout(12000)),
+    );
   }
 
   private findZoneForClaim(
