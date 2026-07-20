@@ -19,6 +19,10 @@ export class SaveRoutingAreaPlanDto {
   @IsString({ each: true })
   categorias!: string[];
 
+  @IsOptional()
+  @IsString()
+  originAddress?: string;
+
   @IsLatitude()
   originLat!: number;
 

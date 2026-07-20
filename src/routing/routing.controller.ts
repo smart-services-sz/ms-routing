@@ -50,6 +50,11 @@ export class RoutingController {
     return this.routingService.confirmPlan(payload.id);
   }
 
+  @MessagePattern('routing.plan.delete')
+  deletePlan(@Payload() payload: RoutingPlanIdDto) {
+    return this.routingService.deletePlan(payload.id);
+  }
+
   @MessagePattern('routing.area-plans.list')
   listAreaPlans() {
     return this.routingService.listAreaPlans();

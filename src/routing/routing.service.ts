@@ -226,6 +226,20 @@ export class RoutingService {
     return { status: 'ok', message: 'Plan confirmado correctamente' };
   }
 
+  async deletePlan(id: string) {
+    const exists = await this.prisma.routingPlan.findUnique({ where: { id }, select: { id: true } });
+    if (!exists) {
+      throw new HttpException('Plan de ruteo no encontrado', HttpStatus.NOT_FOUND);
+    }
+
+    await this.prisma.routingPlan.delete({ where: { id } });
+
+    return {
+      status: 'ok',
+      message: 'Plan de ruteo eliminado correctamente',
+    };
+  }
+
   async listAreaPlans() {
     const plans = await this.prisma.routingAreaPlan.findMany({
       orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
@@ -258,6 +272,7 @@ export class RoutingService {
             userId: payload.userId,
             userName: payload.userName,
             categorias: payload.categorias,
+            originAddress: payload.originAddress,
             originLat: payload.originLat,
             originLng: payload.originLng,
             dailyByUser: payload.dailyByUser,
@@ -269,6 +284,7 @@ export class RoutingService {
             userId: payload.userId,
             userName: payload.userName,
             categorias: payload.categorias,
+            originAddress: payload.originAddress,
             originLat: payload.originLat,
             originLng: payload.originLng,
             dailyByUser: payload.dailyByUser,
@@ -281,6 +297,7 @@ export class RoutingService {
             userId: payload.userId,
             userName: payload.userName,
             categorias: payload.categorias,
+            originAddress: payload.originAddress,
             originLat: payload.originLat,
             originLng: payload.originLng,
             dailyByUser: payload.dailyByUser,

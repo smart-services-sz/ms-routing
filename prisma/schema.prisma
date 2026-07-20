@@ -45,6 +45,7 @@ model RoutingAreaPlan {
   userId          String
   userName        String?
   categorias      String[]
+  originAddress   String?
   originLat       Float
   originLng       Float
   dailyByUser     Int
