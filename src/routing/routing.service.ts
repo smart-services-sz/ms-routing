@@ -7,6 +7,7 @@ import { GetAssignedRouteDto } from './dto/get-assigned-route.dto';
 import { UpdateRouteStatusDto } from './dto/update-route-status.dto';
 import { RegisterInterventionDto } from './dto/register-intervention.dto';
 import { AttachInterventionEvidenceDto } from './dto/attach-intervention-evidence.dto';
+import { SaveRoutingAreaPlanDto } from './dto/save-routing-area-plan.dto';
 import {
   ClaimCategoria,
   ClaimPrioridad,
@@ -185,6 +186,88 @@ export class RoutingService {
     ]);
 
     return { status: 'ok', message: 'Plan confirmado correctamente' };
+  }
+
+  async listAreaPlans() {
+    const plans = await this.prisma.routingAreaPlan.findMany({
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+    });
+
+    return {
+      status: 'ok',
+      data: plans,
+    };
+  }
+
+  async getAreaPlan(id: string) {
+    const plan = await this.prisma.routingAreaPlan.findUnique({ where: { id } });
+    if (!plan) {
+      throw new HttpException('Plan por area no encontrado', HttpStatus.NOT_FOUND);
+    }
+
+    return {
+      status: 'ok',
+      data: plan,
+    };
+  }
+
+  async saveAreaPlan(payload: SaveRoutingAreaPlanDto) {
+    const saved = payload.id
+      ? await this.prisma.routingAreaPlan.upsert({
+          where: { id: payload.id },
+          update: {
+            name: payload.name,
+            userId: payload.userId,
+            userName: payload.userName,
+            categorias: payload.categorias,
+            originLat: payload.originLat,
+            originLng: payload.originLng,
+            dailyByUser: payload.dailyByUser,
+            dailyByCategory: payload.dailyByCategory,
+          },
+          create: {
+            id: payload.id,
+            name: payload.name,
+            userId: payload.userId,
+            userName: payload.userName,
+            categorias: payload.categorias,
+            originLat: payload.originLat,
+            originLng: payload.originLng,
+            dailyByUser: payload.dailyByUser,
+            dailyByCategory: payload.dailyByCategory,
+          },
+        })
+      : await this.prisma.routingAreaPlan.create({
+          data: {
+            name: payload.name,
+            userId: payload.userId,
+            userName: payload.userName,
+            categorias: payload.categorias,
+            originLat: payload.originLat,
+            originLng: payload.originLng,
+            dailyByUser: payload.dailyByUser,
+            dailyByCategory: payload.dailyByCategory,
+          },
+        });
+
+    return {
+      status: 'ok',
+      data: saved,
+    };
+  }
+
+  async deleteAreaPlan(id: string) {
+    const exists = await this.prisma.routingAreaPlan.findUnique({ where: { id }, select: { id: true } });
+    if (!exists) {
+      throw new HttpException('Plan por area no encontrado', HttpStatus.NOT_FOUND);
+    }
+
+    await this.prisma.routingAreaPlan.delete({ where: { id } });
+
+    return {
+      status: 'ok',
+      message: 'Plan por area eliminado correctamente',
+    };
   }
 
   async getAssignedRoute(payload: GetAssignedRouteDto) {

@@ -4,6 +4,8 @@ import { RoutingService } from './routing.service';
 import { SimulateRoutingDto } from './dto/simulate-routing.dto';
 import { UpsertRoutingRulesDto } from './dto/upsert-routing-rules.dto';
 import { RoutingPlanIdDto } from './dto/routing-plan-id.dto';
+import { SaveRoutingAreaPlanDto } from './dto/save-routing-area-plan.dto';
+import { RoutingAreaPlanIdDto } from './dto/routing-area-plan-id.dto';
 import { GetAssignedRouteDto } from './dto/get-assigned-route.dto';
 import { UpdateRouteStatusDto } from './dto/update-route-status.dto';
 import { RegisterInterventionDto } from './dto/register-intervention.dto';
@@ -41,6 +43,26 @@ export class RoutingController {
   @MessagePattern('routing.plan.confirm')
   confirmPlan(@Payload() payload: RoutingPlanIdDto) {
     return this.routingService.confirmPlan(payload.id);
+  }
+
+  @MessagePattern('routing.area-plans.list')
+  listAreaPlans() {
+    return this.routingService.listAreaPlans();
+  }
+
+  @MessagePattern('routing.area-plans.get')
+  getAreaPlan(@Payload() payload: RoutingAreaPlanIdDto) {
+    return this.routingService.getAreaPlan(payload.id);
+  }
+
+  @MessagePattern('routing.area-plans.save')
+  saveAreaPlan(@Payload() payload: SaveRoutingAreaPlanDto) {
+    return this.routingService.saveAreaPlan(payload);
+  }
+
+  @MessagePattern('routing.area-plans.delete')
+  deleteAreaPlan(@Payload() payload: RoutingAreaPlanIdDto) {
+    return this.routingService.deleteAreaPlan(payload.id);
   }
 
   @MessagePattern('routing.assigned-route.get')
