@@ -11,12 +11,21 @@ import {
 } from 'class-validator';
 
 export class CrewRuleDto {
+  @IsOptional()
   @IsString()
-  crewId!: string;
+  crewId?: string;
+
+  @IsOptional()
+  @IsString()
+  userId?: string;
 
   @IsOptional()
   @IsString()
   nombre?: string;
+
+  @IsOptional()
+  @IsString()
+  userName?: string;
 
   @IsInt()
   @Min(1)

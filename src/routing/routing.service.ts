@@ -29,6 +29,26 @@ export class RoutingService {
   ) {}
 
   async upsertRules(payload: UpsertRoutingRulesDto) {
+    const normalizedCrews = payload.crews.map((crew) => {
+      const assigneeId = crew.userId ?? crew.crewId;
+      if (!assigneeId) {
+        throw new HttpException(
+          'Cada regla de asignacion debe incluir userId o crewId',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+
+      return {
+        crewId: assigneeId,
+        nombre: crew.userName ?? crew.nombre ?? assigneeId,
+        maxReclamosDiarios: crew.maxReclamosDiarios,
+        allowedCategorias: crew.allowedCategorias,
+        allowedZoneIds: crew.allowedZoneIds ?? [],
+        startLat: crew.startLat,
+        startLng: crew.startLng,
+      };
+    });
+
     await this.prisma.$transaction(async (tx) => {
       await tx.routingCategoryRule.deleteMany();
       await tx.routingCrewRule.deleteMany();
@@ -44,17 +64,9 @@ export class RoutingService {
         });
       }
 
-      if (payload.crews.length > 0) {
+      if (normalizedCrews.length > 0) {
         await tx.routingCrewRule.createMany({
-          data: payload.crews.map((crew) => ({
-            crewId: crew.crewId,
-            nombre: crew.nombre ?? crew.crewId,
-            maxReclamosDiarios: crew.maxReclamosDiarios,
-            allowedCategorias: crew.allowedCategorias,
-            allowedZoneIds: crew.allowedZoneIds ?? [],
-            startLat: crew.startLat,
-            startLng: crew.startLng,
-          })),
+          data: normalizedCrews,
         });
       }
 
@@ -92,7 +104,9 @@ export class RoutingService {
         })),
         crews: crews.map((c) => ({
           crewId: c.crewId,
+          userId: c.crewId,
           nombre: c.nombre ?? c.crewId,
+          userName: c.nombre ?? c.crewId,
           maxReclamosDiarios: c.maxReclamosDiarios,
           allowedCategorias: c.allowedCategorias,
           allowedZoneIds: c.allowedZoneIds,
@@ -174,9 +188,14 @@ export class RoutingService {
   }
 
   async getAssignedRoute(payload: GetAssignedRouteDto) {
+    const assigneeId = payload.userId ?? payload.crewId;
+    if (!assigneeId) {
+      throw new HttpException('Debe enviar userId o crewId', HttpStatus.BAD_REQUEST);
+    }
+
     const route = await this.prisma.routingRoute.findFirst({
       where: {
-        crewId: payload.crewId,
+        crewId: assigneeId,
         status: {
           in: ['assigned', 'in_progress'],
         },
@@ -211,7 +230,10 @@ export class RoutingService {
     });
 
     if (!route) {
-      throw new HttpException('No se encontro una ruta asignada para la cuadrilla indicada', HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        'No se encontro una ruta asignada para el usuario/cuadrilla indicado',
+        HttpStatus.NOT_FOUND,
+      );
     }
 
     return {

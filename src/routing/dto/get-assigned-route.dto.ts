@@ -1,8 +1,13 @@
 import { IsOptional, IsString } from 'class-validator';
 
 export class GetAssignedRouteDto {
+  @IsOptional()
   @IsString()
-  crewId!: string;
+  crewId?: string;
+
+  @IsOptional()
+  @IsString()
+  userId?: string;
 
   @IsOptional()
   @IsString()
