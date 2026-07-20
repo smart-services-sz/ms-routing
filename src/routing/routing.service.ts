@@ -168,6 +168,44 @@ export class RoutingService {
     };
   }
 
+  async listPlans() {
+    const plans = await this.prisma.routingPlan.findMany({
+      orderBy: [{ planningDate: 'desc' }, { createdAt: 'desc' }],
+      include: {
+        routes: {
+          select: {
+            crewId: true,
+            nombre: true,
+            assignedClaims: true,
+          },
+          orderBy: { createdAt: 'asc' },
+        },
+        _count: {
+          select: {
+            routes: true,
+            unassigned: true,
+          },
+        },
+      },
+      take: 50,
+    });
+
+    return {
+      status: 'ok',
+      data: plans.map((plan) => ({
+        id: plan.id,
+        planningDate: plan.planningDate.toISOString(),
+        status: plan.status,
+        createdAt: plan.createdAt.toISOString(),
+        updatedAt: plan.updatedAt.toISOString(),
+        totalRoutes: plan._count.routes,
+        totalUnassigned: plan._count.unassigned,
+        totalAssigned: plan.routes.reduce((acc, route) => acc + route.assignedClaims, 0),
+        routes: plan.routes,
+      })),
+    };
+  }
+
   async confirmPlan(id: string) {
     const exists = await this.prisma.routingPlan.findUnique({ where: { id }, select: { id: true } });
     if (!exists) {

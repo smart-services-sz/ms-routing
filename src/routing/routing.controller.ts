@@ -40,6 +40,11 @@ export class RoutingController {
     return this.routingService.getPlan(payload.id);
   }
 
+  @MessagePattern('routing.plans.list')
+  listPlans() {
+    return this.routingService.listPlans();
+  }
+
   @MessagePattern('routing.plan.confirm')
   confirmPlan(@Payload() payload: RoutingPlanIdDto) {
     return this.routingService.confirmPlan(payload.id);
