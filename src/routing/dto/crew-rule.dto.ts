@@ -29,7 +29,7 @@ export class CrewRuleDto {
 
   @IsInt()
   @Min(1)
-  @Max(1000)
+  @Max(20)
   maxReclamosDiarios!: number;
 
   @IsArray()

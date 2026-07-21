@@ -31,11 +31,11 @@ export class SaveRoutingAreaPlanDto {
 
   @IsInt()
   @Min(1)
-  @Max(1000)
+  @Max(20)
   dailyByUser!: number;
 
   @IsInt()
   @Min(1)
-  @Max(1000)
+  @Max(20)
   dailyByCategory!: number;
 }

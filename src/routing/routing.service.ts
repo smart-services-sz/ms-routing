@@ -21,6 +21,7 @@ import { firstValueFrom, timeout } from 'rxjs';
 
 @Injectable()
 export class RoutingService {
+  private readonly MAX_CLAIMS_PER_ROUTE = 20;
   private readonly logger = new Logger(RoutingService.name);
   private readonly googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY ?? '';
 
@@ -42,7 +43,7 @@ export class RoutingService {
       return {
         crewId: assigneeId,
         nombre: crew.userName ?? crew.nombre ?? assigneeId,
-        maxReclamosDiarios: crew.maxReclamosDiarios,
+        maxReclamosDiarios: Math.min(crew.maxReclamosDiarios, this.MAX_CLAIMS_PER_ROUTE),
         allowedCategorias: crew.allowedCategorias,
         allowedZoneIds: crew.allowedZoneIds ?? [],
         startLat: crew.startLat,
@@ -399,8 +400,8 @@ export class RoutingService {
             originAddress: payload.originAddress,
             originLat: payload.originLat,
             originLng: payload.originLng,
-            dailyByUser: payload.dailyByUser,
-            dailyByCategory: payload.dailyByCategory,
+            dailyByUser: Math.min(payload.dailyByUser, this.MAX_CLAIMS_PER_ROUTE),
+            dailyByCategory: Math.min(payload.dailyByCategory, this.MAX_CLAIMS_PER_ROUTE),
           },
           create: {
             id: payload.id,
@@ -411,8 +412,8 @@ export class RoutingService {
             originAddress: payload.originAddress,
             originLat: payload.originLat,
             originLng: payload.originLng,
-            dailyByUser: payload.dailyByUser,
-            dailyByCategory: payload.dailyByCategory,
+            dailyByUser: Math.min(payload.dailyByUser, this.MAX_CLAIMS_PER_ROUTE),
+            dailyByCategory: Math.min(payload.dailyByCategory, this.MAX_CLAIMS_PER_ROUTE),
           },
         })
       : await this.prisma.routingAreaPlan.create({
@@ -424,8 +425,8 @@ export class RoutingService {
             originAddress: payload.originAddress,
             originLat: payload.originLat,
             originLng: payload.originLng,
-            dailyByUser: payload.dailyByUser,
-            dailyByCategory: payload.dailyByCategory,
+            dailyByUser: Math.min(payload.dailyByUser, this.MAX_CLAIMS_PER_ROUTE),
+            dailyByCategory: Math.min(payload.dailyByCategory, this.MAX_CLAIMS_PER_ROUTE),
           },
         });
 
