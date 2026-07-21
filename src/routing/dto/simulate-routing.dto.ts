@@ -15,6 +15,10 @@ import { UpsertRoutingRulesDto } from './upsert-routing-rules.dto';
 export class SimulateRoutingDto {
   @IsOptional()
   @IsString()
+  idempotencyKey?: string;
+
+  @IsOptional()
+  @IsString()
   planningDate?: string;
 
   @IsOptional()

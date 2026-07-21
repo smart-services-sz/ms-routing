@@ -119,12 +119,67 @@ export class RoutingService {
     };
   }
 
+  /** TTL for claim reservations: 60 minutes */
+  private readonly RESERVATION_TTL_MS = 60 * 60 * 1000;
+
   async simulate(payload: SimulateRoutingDto) {
-    return this.buildSimulation(payload, false);
+    return this.buildSimulation(payload, false, null);
   }
 
   async generate(payload: SimulateRoutingDto) {
-    return this.buildSimulation(payload, true);
+    const idempotencyKey = payload.idempotencyKey ?? null;
+
+    // --- Idempotency check ---
+    if (idempotencyKey) {
+      const existing = await this.prisma.routingGenerationRequest.findUnique({
+        where: { idempotencyKey },
+      });
+      if (existing) {
+        if (existing.status === 'completed' && existing.response) {
+          this.logger.log(`Idempotency hit: ${idempotencyKey}`);
+          return existing.response as object;
+        }
+        if (existing.status === 'processing') {
+          throw new HttpException(
+            'Esta generacion ya esta en proceso. Reintenta en unos segundos.',
+            HttpStatus.CONFLICT,
+          );
+        }
+      }
+    }
+
+    // --- Mark as processing ---
+    const requestRecord = idempotencyKey
+      ? await this.prisma.routingGenerationRequest.upsert({
+          where: { idempotencyKey },
+          create: { idempotencyKey, status: 'processing' },
+          update: { status: 'processing', response: undefined },
+        })
+      : null;
+
+    try {
+      // --- Expire stale reservations before selecting candidates ---
+      await this.expireStaleReservations();
+
+      const result = await this.buildSimulation(payload, true, requestRecord?.id ?? null);
+
+      if (requestRecord && idempotencyKey) {
+        await this.prisma.routingGenerationRequest.update({
+          where: { idempotencyKey },
+          data: { status: 'completed', response: result as unknown as object, planId: result.savedPlanId ?? undefined },
+        });
+      }
+
+      return result;
+    } catch (err) {
+      if (requestRecord && idempotencyKey) {
+        await this.prisma.routingGenerationRequest.update({
+          where: { idempotencyKey },
+          data: { status: 'failed' },
+        }).catch(() => { /* swallow to surface original error */ });
+      }
+      throw err;
+    }
   }
 
   async getPlan(id: string) {
@@ -207,21 +262,77 @@ export class RoutingService {
   }
 
   async confirmPlan(id: string) {
-    const exists = await this.prisma.routingPlan.findUnique({ where: { id }, select: { id: true } });
-    if (!exists) {
+    const plan = await this.prisma.routingPlan.findUnique({
+      where: { id },
+      select: { id: true, status: true },
+    });
+    if (!plan) {
       throw new HttpException('Plan de ruteo no encontrado', HttpStatus.NOT_FOUND);
     }
+    if (plan.status === 'confirmed') {
+      return { status: 'ok', message: 'Plan ya estaba confirmado' };
+    }
 
-    await this.prisma.$transaction([
-      this.prisma.routingPlan.update({
+    const now = new Date();
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1. Confirm plan + routes
+      await tx.routingPlan.update({
         where: { id },
         data: { status: 'confirmed' },
-      }),
-      this.prisma.routingRoute.updateMany({
+      });
+      await tx.routingRoute.updateMany({
         where: { planId: id },
-        data: { status: 'assigned', assignedAt: new Date() },
-      }),
-    ]);
+        data: { status: 'assigned', assignedAt: now },
+      });
+
+      // 2. Get all claim IDs in this plan's stops
+      const stops = await tx.routingStop.findMany({
+        where: { route: { planId: id } },
+        select: { reclamoId: true },
+      });
+      const claimIds = stops.map((s) => s.reclamoId);
+
+      if (claimIds.length === 0) return;
+
+      // 3. Mark allocations as assigned (upsert to handle missing rows)
+      for (const claimId of claimIds) {
+        await tx.routingClaimAllocation.upsert({
+          where: { claimId },
+          create: {
+            claimId,
+            state: 'assigned',
+            assignedPlanId: id,
+            assignedAt: now,
+          },
+          update: {
+            state: 'assigned',
+            assignedPlanId: id,
+            assignedAt: now,
+            reservationToken: null,
+            reservedByPlanId: null,
+            reservedAt: null,
+            expiresAt: null,
+          },
+        });
+      }
+
+      // 4. Release any other reservations for these claims from OTHER plans
+      await tx.routingClaimAllocation.updateMany({
+        where: {
+          claimId: { in: claimIds },
+          state: 'reserved',
+          reservedByPlanId: { not: id },
+        },
+        data: {
+          state: 'available',
+          reservationToken: null,
+          reservedByPlanId: null,
+          reservedAt: null,
+          expiresAt: null,
+        },
+      });
+    });
 
     return { status: 'ok', message: 'Plan confirmado correctamente' };
   }
@@ -232,7 +343,20 @@ export class RoutingService {
       throw new HttpException('Plan de ruteo no encontrado', HttpStatus.NOT_FOUND);
     }
 
-    await this.prisma.routingPlan.delete({ where: { id } });
+    await this.prisma.$transaction(async (tx) => {
+      // Release any reservations held by this plan before deleting
+      await tx.routingClaimAllocation.updateMany({
+        where: { reservedByPlanId: id, state: 'reserved' },
+        data: {
+          state: 'available',
+          reservationToken: null,
+          reservedByPlanId: null,
+          reservedAt: null,
+          expiresAt: null,
+        },
+      });
+      await tx.routingPlan.delete({ where: { id } });
+    });
 
     return {
       status: 'ok',
@@ -558,7 +682,23 @@ export class RoutingService {
     };
   }
 
-  private async buildSimulation(payload: SimulateRoutingDto, forcePersist: boolean) {
+  private async expireStaleReservations() {
+    await this.prisma.routingClaimAllocation.updateMany({
+      where: {
+        state: 'reserved',
+        expiresAt: { lt: new Date() },
+      },
+      data: {
+        state: 'available',
+        reservationToken: null,
+        reservedByPlanId: null,
+        reservedAt: null,
+        expiresAt: null,
+      },
+    });
+  }
+
+  private async buildSimulation(payload: SimulateRoutingDto, forcePersist: boolean, generationRequestId: string | null) {
     const maxFetch = payload.maxFetch ?? 200;
     const planningDate = payload.planningDate ?? new Date().toISOString().slice(0, 10);
     const useGoogleOptimization = payload.useGoogleOptimization ?? true;
@@ -573,7 +713,15 @@ export class RoutingService {
     }
 
     const fetchedClaims = await this.fetchClaims(maxFetch);
-    const validClaims = fetchedClaims.filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lng));
+
+    // Exclude claims already assigned to a confirmed plan or actively reserved by another run
+    const blockedClaimIds = forcePersist
+      ? await this.getBlockedClaimIds()
+      : new Set<string>();
+
+    const validClaims = fetchedClaims.filter(
+      (c) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && !blockedClaimIds.has(c.id),
+    );
 
     const zoneByClaimId = new Map<string, string | null>();
     for (const claim of validClaims) {
@@ -667,7 +815,15 @@ export class RoutingService {
 
     let savedPlanId: string | null = null;
     if (persistPlan) {
-      const plan = await this.persistPlan(planningDate, summary, routes, unassigned);
+      const assignedClaimIds = routes.flatMap((r) => r.stops.map((s) => s.reclamoId));
+      const plan = await this.persistPlanWithReservation(
+        planningDate,
+        summary,
+        routes,
+        unassigned,
+        assignedClaimIds,
+        generationRequestId,
+      );
       savedPlanId = plan.id;
     }
 
@@ -931,6 +1087,153 @@ export class RoutingService {
       totalDistanceKm: Number(totalDistanceKm.toFixed(3)),
       totalDurationMin,
     };
+  }
+
+  /** Returns Set of claimIds that are either assigned to a confirmed plan
+   *  or actively reserved (not expired) by another in-flight generation. */
+  private async getBlockedClaimIds(): Promise<Set<string>> {
+    const rows = await this.prisma.routingClaimAllocation.findMany({
+      where: {
+        OR: [
+          { state: 'assigned' },
+          {
+            state: 'reserved',
+            expiresAt: { gt: new Date() },
+          },
+        ],
+      },
+      select: { claimId: true },
+    });
+    return new Set(rows.map((r) => r.claimId));
+  }
+
+  private async persistPlanWithReservation(
+    planningDate: string,
+    summary: SimulationSummary,
+    routes: Array<{
+      crewId: string;
+      nombre: string;
+      assignedClaims: number;
+      maxReclamosDiarios: number;
+      totalDistanceKm: number;
+      totalDurationMin: number;
+      stops: Array<{
+        sequence: number;
+        reclamoId: string;
+        categoria: string;
+        prioridad: string;
+        zoneId: string | null;
+        lat: number;
+        lng: number;
+        direccion: string;
+        distanceFromPreviousKm: number;
+        durationFromPreviousMin: number;
+        createdAt: string;
+      }>;
+    }>,
+    unassigned: Array<{ reclamoId: string; reason: string }>,
+    assignedClaimIds: string[],
+    generationRequestId: string | null,
+  ) {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + this.RESERVATION_TTL_MS);
+    const reservationToken = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    return this.prisma.$transaction(async (tx) => {
+      // 1. Persist the plan
+      const plan = await tx.routingPlan.create({
+        data: {
+          planningDate: new Date(`${planningDate}T00:00:00.000Z`),
+          status: 'proposed',
+          summary: summary as unknown as object,
+          routes: {
+            create: routes.map((route) => ({
+              crewId: route.crewId,
+              nombre: route.nombre,
+              status: 'assigned',
+              assignedClaims: route.assignedClaims,
+              maxReclamosDiarios: route.maxReclamosDiarios,
+              totalDistanceKm: route.totalDistanceKm,
+              totalDurationMin: route.totalDurationMin,
+              stops: {
+                create: route.stops.map((stop) => ({
+                  sequence: stop.sequence,
+                  status: 'pendiente',
+                  reclamoId: stop.reclamoId,
+                  categoria: stop.categoria,
+                  prioridad: stop.prioridad,
+                  zoneId: stop.zoneId,
+                  lat: stop.lat,
+                  lng: stop.lng,
+                  direccion: stop.direccion,
+                  distanceFromPreviousKm: stop.distanceFromPreviousKm,
+                  durationFromPreviousMin: stop.durationFromPreviousMin,
+                  createdAt: new Date(stop.createdAt),
+                })),
+              },
+            })),
+          },
+          unassigned: {
+            create: unassigned.map((u) => ({
+              reclamoId: u.reclamoId,
+              reason: u.reason,
+            })),
+          },
+        },
+        select: { id: true },
+      });
+
+      // 2. Reserve each assigned claim atomically
+      // Only reserve claims that are currently 'available' (not already assigned/reserved)
+      for (const claimId of assignedClaimIds) {
+        await tx.routingClaimAllocation.upsert({
+          where: { claimId },
+          create: {
+            claimId,
+            state: 'reserved',
+            reservationToken,
+            reservedByPlanId: plan.id,
+            reservedAt: now,
+            expiresAt,
+          },
+          update: {
+            // Only overwrite if still available (state check done below)
+            state: 'reserved',
+            reservationToken,
+            reservedByPlanId: plan.id,
+            reservedAt: now,
+            expiresAt,
+          },
+        });
+      }
+
+      // 3. Verify no claim was already assigned to another confirmed plan
+      const conflicts = await tx.routingClaimAllocation.findMany({
+        where: {
+          claimId: { in: assignedClaimIds },
+          state: 'assigned',
+          assignedPlanId: { not: plan.id },
+        },
+        select: { claimId: true },
+      });
+
+      if (conflicts.length > 0) {
+        throw new HttpException(
+          `${conflicts.length} reclamo(s) ya fueron asignados a otro plan confirmado. Regenera la corrida para obtener candidatos actualizados.`,
+          HttpStatus.CONFLICT,
+        );
+      }
+
+      // 4. Link request record to plan if provided
+      if (generationRequestId) {
+        await tx.routingGenerationRequest.update({
+          where: { id: generationRequestId },
+          data: { planId: plan.id },
+        });
+      }
+
+      return plan;
+    });
   }
 
   private async persistPlan(
