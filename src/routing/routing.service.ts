@@ -9,7 +9,6 @@ import { RegisterInterventionDto } from './dto/register-intervention.dto';
 import { AttachInterventionEvidenceDto } from './dto/attach-intervention-evidence.dto';
 import { SaveRoutingAreaPlanDto } from './dto/save-routing-area-plan.dto';
 import {
-  ClaimCategoria,
   ClaimPrioridad,
   InterventionResult,
   ReclamoItem,
@@ -18,16 +17,20 @@ import {
   SimulationSummary,
 } from './routing.types';
 import { firstValueFrom, timeout } from 'rxjs';
+import { RoutingPlannerContext } from './patterns/strategy/routing-planner.context';
+import { RouteDraft } from './patterns/strategy/route-optimization.types';
+import { RouteLifecycleContext } from './patterns/state/route-lifecycle.context';
 
 @Injectable()
 export class RoutingService {
   private readonly MAX_CLAIMS_PER_ROUTE = 20;
   private readonly logger = new Logger(RoutingService.name);
-  private readonly googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY ?? '';
 
   constructor(
     private readonly prisma: PrismaService,
     @Inject('NATS_CLIENT') private readonly natsClient: ClientProxy,
+    private readonly routingPlannerContext: RoutingPlannerContext,
+    private readonly routeLifecycleContext: RouteLifecycleContext,
   ) {}
 
   async upsertRules(payload: UpsertRoutingRulesDto) {
@@ -511,6 +514,7 @@ export class RoutingService {
       select: {
         id: true,
         status: true,
+        startedAt: true,
       },
     });
 
@@ -519,34 +523,12 @@ export class RoutingService {
     }
 
     const now = new Date();
-    const data: {
-      status: RoutingRouteStatus;
-      startedAt?: Date | null;
-      completedAt?: Date | null;
-    } = {
-      status: payload.status,
-    };
-
-    if (payload.status === 'in_progress') {
-      data.startedAt = route.status === 'in_progress' ? undefined : now;
-      data.completedAt = null;
-    }
-
-    if (payload.status === 'completed') {
-      data.completedAt = now;
-      if (route.status !== 'in_progress') {
-        data.startedAt = route.status === 'assigned' ? now : undefined;
-      }
-    }
-
-    if (payload.status === 'assigned') {
-      data.startedAt = null;
-      data.completedAt = null;
-    }
-
-    if (payload.status === 'cancelled') {
-      data.completedAt = now;
-    }
+    const data = this.routeLifecycleContext.transition({
+      currentStatus: route.status as RoutingRouteStatus,
+      targetStatus: payload.status,
+      startedAt: route.startedAt,
+      now,
+    });
 
     await this.prisma.routingRoute.update({
       where: { id: payload.routeId },
@@ -613,12 +595,16 @@ export class RoutingService {
       });
 
       if (stop.route.status === 'assigned') {
+        const startTransition = this.routeLifecycleContext.transition({
+          currentStatus: stop.route.status,
+          targetStatus: 'in_progress',
+          startedAt: stop.route.startedAt,
+          now,
+        });
+
         await tx.routingRoute.update({
           where: { id: stop.routeId },
-          data: {
-            status: 'in_progress',
-            startedAt: stop.route.startedAt ?? now,
-          },
+          data: startTransition,
         });
       }
 
@@ -630,12 +616,22 @@ export class RoutingService {
       });
 
       if (pendingStops === 0) {
+        const effectiveStartedAt =
+          stop.route.status === 'assigned' ? stop.route.startedAt ?? now : stop.route.startedAt;
+
+        const completedTransition = this.routeLifecycleContext.transition({
+          currentStatus:
+            stop.route.status === 'assigned'
+              ? 'in_progress'
+              : (stop.route.status as RoutingRouteStatus),
+          targetStatus: 'completed',
+          startedAt: effectiveStartedAt,
+          now,
+        });
+
         await tx.routingRoute.update({
           where: { id: stop.routeId },
-          data: {
-            status: 'completed',
-            completedAt: now,
-          },
+          data: completedTransition,
         });
       }
 
@@ -782,7 +778,7 @@ export class RoutingService {
       categoryConsumption[claim.categoria] = consumed + 1;
     }
 
-    let routes = routeBuilders
+    let routes: RouteDraft[] = routeBuilders
       .filter((r) => r.claims.length > 0)
       .map((builder) =>
         this.buildRoute(builder.crew, builder.claims, zoneByClaimId, payload.originLat, payload.originLng),
@@ -792,7 +788,11 @@ export class RoutingService {
     let failedRoutes = 0;
 
     if (useGoogleOptimization) {
-      const optimizedResult = await this.optimizeRoutesWithGoogle(routes, payload.originLat, payload.originLng);
+      const optimizedResult = await this.routingPlannerContext.optimize(routes, {
+        useGoogleOptimization,
+        originLat: payload.originLat,
+        originLng: payload.originLng,
+      });
       routes = optimizedResult.routes;
       optimizedRoutes = optimizedResult.optimizedRoutes;
       failedRoutes = optimizedResult.failedRoutes;
@@ -935,158 +935,6 @@ export class RoutingService {
       totalDistanceKm: Number(totalDistance.toFixed(3)),
       totalDurationMin: totalDuration,
       stops,
-    };
-  }
-
-  private async optimizeRoutesWithGoogle(
-    routes: Array<{
-      crewId: string;
-      nombre: string;
-      assignedClaims: number;
-      maxReclamosDiarios: number;
-      totalDistanceKm: number;
-      totalDurationMin: number;
-      stops: Array<{
-        sequence: number;
-        reclamoId: string;
-        categoria: ClaimCategoria;
-        prioridad: ClaimPrioridad;
-        zoneId: string | null;
-        lat: number;
-        lng: number;
-        direccion: string;
-        distanceFromPreviousKm: number;
-        durationFromPreviousMin: number;
-        createdAt: string;
-      }>;
-    }>,
-    originLat?: number,
-    originLng?: number,
-  ) {
-    if (!this.googleMapsApiKey.trim()) {
-      this.logger.warn('useGoogleOptimization=true pero falta GOOGLE_MAPS_API_KEY; se usa fallback local');
-      return { routes, optimizedRoutes: 0, failedRoutes: routes.length };
-    }
-
-    const optimizedRoutes: typeof routes = [];
-    let success = 0;
-    let failed = 0;
-
-    for (const route of routes) {
-      try {
-        const optimized = await this.optimizeSingleRouteWithGoogle(route, originLat, originLng);
-        optimizedRoutes.push(optimized);
-        success += 1;
-      } catch (error) {
-        failed += 1;
-        this.logger.warn(
-          `No se pudo optimizar ruta crewId=${route.crewId} con Google: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        optimizedRoutes.push(route);
-      }
-    }
-
-    return {
-      routes: optimizedRoutes,
-      optimizedRoutes: success,
-      failedRoutes: failed,
-    };
-  }
-
-  private async optimizeSingleRouteWithGoogle(
-    route: {
-      crewId: string;
-      nombre: string;
-      assignedClaims: number;
-      maxReclamosDiarios: number;
-      totalDistanceKm: number;
-      totalDurationMin: number;
-      stops: Array<{
-        sequence: number;
-        reclamoId: string;
-        categoria: ClaimCategoria;
-        prioridad: ClaimPrioridad;
-        zoneId: string | null;
-        lat: number;
-        lng: number;
-        direccion: string;
-        distanceFromPreviousKm: number;
-        durationFromPreviousMin: number;
-        createdAt: string;
-      }>;
-    },
-    originLat?: number,
-    originLng?: number,
-  ) {
-    if (route.stops.length <= 1) {
-      return route;
-    }
-
-    const startLat = originLat ?? route.stops[0].lat;
-    const startLng = originLng ?? route.stops[0].lng;
-
-    const waypoints = route.stops.map((s) => `${s.lat},${s.lng}`).join('|');
-    const directionsUrl =
-      'https://maps.googleapis.com/maps/api/directions/json?' +
-      `origin=${encodeURIComponent(`${startLat},${startLng}`)}` +
-      `&destination=${encodeURIComponent(`${startLat},${startLng}`)}` +
-      `&waypoints=${encodeURIComponent(`optimize:true|${waypoints}`)}` +
-      '&mode=driving' +
-      `&key=${encodeURIComponent(this.googleMapsApiKey)}`;
-
-    const response = await fetch(directionsUrl);
-    if (!response.ok) {
-      throw new Error(`Google Directions HTTP ${response.status}`);
-    }
-
-    const data = (await response.json()) as {
-      status?: string;
-      routes?: Array<{
-        waypoint_order?: number[];
-        legs?: Array<{
-          distance?: { value?: number };
-          duration?: { value?: number };
-        }>;
-      }>;
-    };
-
-    if (data.status !== 'OK' || !data.routes?.length) {
-      throw new Error(`Google Directions status=${data.status ?? 'unknown'}`);
-    }
-
-    const best = data.routes[0];
-    const order = best.waypoint_order ?? route.stops.map((_, idx) => idx);
-    const reorderedStops = order.map((idx, i) => ({
-      ...route.stops[idx],
-      sequence: i + 1,
-    }));
-
-    const legs = best.legs ?? [];
-    let totalDistanceKm = 0;
-    let totalDurationMin = 0;
-
-    const stopsWithMetrics = reorderedStops.map((stop, index) => {
-      const leg = legs[index];
-      const distanceMeters = leg?.distance?.value ?? 0;
-      const durationSeconds = leg?.duration?.value ?? 0;
-      const distanceKm = distanceMeters / 1000;
-      const durationMin = Math.max(0, Math.round(durationSeconds / 60));
-
-      totalDistanceKm += distanceKm;
-      totalDurationMin += durationMin;
-
-      return {
-        ...stop,
-        distanceFromPreviousKm: Number(distanceKm.toFixed(3)),
-        durationFromPreviousMin: durationMin,
-      };
-    });
-
-    return {
-      ...route,
-      stops: stopsWithMetrics,
-      totalDistanceKm: Number(totalDistanceKm.toFixed(3)),
-      totalDurationMin,
     };
   }
 
