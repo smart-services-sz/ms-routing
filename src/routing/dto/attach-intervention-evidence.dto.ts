@@ -1,4 +1,12 @@
-import { IsIn, IsOptional, IsString, IsUUID, IsUrl, MaxLength } from 'class-validator';
+import {
+  IsIn,
+  IsBoolean,
+  IsOptional,
+  IsString,
+  IsUUID,
+  IsUrl,
+  MaxLength,
+} from 'class-validator';
 
 export class AttachInterventionEvidenceDto {
   @IsUUID('4')
@@ -18,4 +26,12 @@ export class AttachInterventionEvidenceDto {
   @IsString()
   @MaxLength(1000)
   descripcion?: string;
+
+  @IsOptional()
+  @IsUUID('4')
+  actorId?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  actorIsAdmin?: boolean;
 }

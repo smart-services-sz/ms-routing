@@ -1,5 +1,12 @@
-import { RouteOptimizationOptions, RouteOptimizationResult, RouteDraft } from './route-optimization.types';
+import {
+  RouteOptimizationOptions,
+  RouteOptimizationResult,
+  RouteDraft,
+} from './route-optimization.types';
 
 export interface RouteOptimizationStrategy {
-  optimize(routes: RouteDraft[], options?: RouteOptimizationOptions): Promise<RouteOptimizationResult>;
+  optimize(
+    routes: RouteDraft[],
+    options?: RouteOptimizationOptions,
+  ): Promise<RouteOptimizationResult>;
 }

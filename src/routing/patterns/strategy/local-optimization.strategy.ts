@@ -1,17 +1,23 @@
 import { Injectable } from '@nestjs/common';
 import { RouteOptimizationStrategy } from './route-optimization-strategy.interface';
-import { RouteOptimizationOptions, RouteOptimizationResult, RouteDraft } from './route-optimization.types';
+import {
+  RouteOptimizationOptions,
+  RouteOptimizationResult,
+  RouteDraft,
+} from './route-optimization.types';
 
 @Injectable()
 export class LocalOptimizationStrategy implements RouteOptimizationStrategy {
-  async optimize(
+  optimize(
     routes: RouteDraft[],
-    _options?: RouteOptimizationOptions,
+    options?: RouteOptimizationOptions,
   ): Promise<RouteOptimizationResult> {
-    return {
+    void options;
+
+    return Promise.resolve({
       routes,
       optimizedRoutes: 0,
       failedRoutes: 0,
-    };
+    });
   }
 }

@@ -1,4 +1,4 @@
-import { IsIn, IsUUID } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsUUID } from 'class-validator';
 
 export class UpdateRouteStatusDto {
   @IsUUID('4')
@@ -6,4 +6,12 @@ export class UpdateRouteStatusDto {
 
   @IsIn(['assigned', 'in_progress', 'completed', 'cancelled'])
   status!: 'assigned' | 'in_progress' | 'completed' | 'cancelled';
+
+  @IsOptional()
+  @IsUUID('4')
+  actorId?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  actorIsAdmin?: boolean;
 }

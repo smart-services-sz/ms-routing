@@ -91,7 +91,9 @@ export class RoutingController {
   }
 
   @MessagePattern('routing.intervention.evidence.attach')
-  attachInterventionEvidence(@Payload() payload: AttachInterventionEvidenceDto) {
+  attachInterventionEvidence(
+    @Payload() payload: AttachInterventionEvidenceDto,
+  ) {
     return this.routingService.attachInterventionEvidence(payload);
   }
 }

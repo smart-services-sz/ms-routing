@@ -1,6 +1,10 @@
 import { Logger } from '@nestjs/common';
 import { RouteOptimizationStrategy } from './route-optimization-strategy.interface';
-import { RouteOptimizationOptions, RouteOptimizationResult, RouteDraft } from './route-optimization.types';
+import {
+  RouteOptimizationOptions,
+  RouteOptimizationResult,
+  RouteDraft,
+} from './route-optimization.types';
 
 export class FallbackOptimizationStrategy implements RouteOptimizationStrategy {
   private readonly logger = new Logger(FallbackOptimizationStrategy.name);

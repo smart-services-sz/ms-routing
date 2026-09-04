@@ -1,6 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { RouteOptimizationStrategy } from './route-optimization-strategy.interface';
-import { RouteOptimizationOptions, RouteOptimizationResult, RouteDraft } from './route-optimization.types';
+import {
+  RouteOptimizationOptions,
+  RouteOptimizationResult,
+  RouteDraft,
+} from './route-optimization.types';
 
 @Injectable()
 export class GoogleMapsOptimizationStrategy implements RouteOptimizationStrategy {
@@ -20,7 +24,11 @@ export class GoogleMapsOptimizationStrategy implements RouteOptimizationStrategy
 
     for (const route of routes) {
       try {
-        const optimized = await this.optimizeSingleRoute(route, options?.originLat, options?.originLng);
+        const optimized = await this.optimizeSingleRoute(
+          route,
+          options?.originLat,
+          options?.originLng,
+        );
         optimizedRoutes.push(optimized);
         success += 1;
       } catch {
@@ -36,7 +44,11 @@ export class GoogleMapsOptimizationStrategy implements RouteOptimizationStrategy
     };
   }
 
-  private async optimizeSingleRoute(route: RouteDraft, originLat?: number, originLng?: number): Promise<RouteDraft> {
+  private async optimizeSingleRoute(
+    route: RouteDraft,
+    originLat?: number,
+    originLng?: number,
+  ): Promise<RouteDraft> {
     if (route.stops.length <= 1) {
       return route;
     }

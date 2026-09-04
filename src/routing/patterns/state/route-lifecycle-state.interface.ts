@@ -13,5 +13,8 @@ export interface RouteStatusUpdate {
 
 export interface RouteLifecycleState {
   code: RoutingRouteStatus;
-  transitionTo(target: RoutingRouteStatus, context: RouteStatusTransitionContext): RouteStatusUpdate;
+  transitionTo(
+    target: RoutingRouteStatus,
+    context: RouteStatusTransitionContext,
+  ): RouteStatusUpdate;
 }

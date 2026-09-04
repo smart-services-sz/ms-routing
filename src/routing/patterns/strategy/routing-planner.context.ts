@@ -1,5 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { RouteOptimizationResult, RouteDraft } from './route-optimization.types';
+import {
+  RouteOptimizationResult,
+  RouteDraft,
+} from './route-optimization.types';
 import { LocalOptimizationStrategy } from './local-optimization.strategy';
 import { GoogleMapsOptimizationStrategy } from './google-maps-optimization.strategy';
 import { FallbackOptimizationStrategy } from './fallback-optimization.strategy';

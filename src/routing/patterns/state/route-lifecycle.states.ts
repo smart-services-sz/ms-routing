@@ -38,9 +38,13 @@ abstract class BaseRouteState implements RouteLifecycleState {
     };
   }
 
-  protected abstract toInProgress(context: RouteStatusTransitionContext): RouteStatusUpdate;
+  protected abstract toInProgress(
+    context: RouteStatusTransitionContext,
+  ): RouteStatusUpdate;
 
-  protected startedAtOnComplete(context: RouteStatusTransitionContext): Date | undefined {
+  protected startedAtOnComplete(
+    context: RouteStatusTransitionContext,
+  ): Date | undefined {
     return context.startedAt ?? undefined;
   }
 }
@@ -48,7 +52,9 @@ abstract class BaseRouteState implements RouteLifecycleState {
 export class AssignedState extends BaseRouteState {
   code: RoutingRouteStatus = 'assigned';
 
-  protected toInProgress(context: RouteStatusTransitionContext): RouteStatusUpdate {
+  protected toInProgress(
+    context: RouteStatusTransitionContext,
+  ): RouteStatusUpdate {
     return {
       status: 'in_progress',
       startedAt: context.now,
@@ -64,7 +70,7 @@ export class AssignedState extends BaseRouteState {
 export class InProgressState extends BaseRouteState {
   code: RoutingRouteStatus = 'in_progress';
 
-  protected toInProgress(_context: RouteStatusTransitionContext): RouteStatusUpdate {
+  protected toInProgress(): RouteStatusUpdate {
     return {
       status: 'in_progress',
       completedAt: null,
@@ -75,7 +81,9 @@ export class InProgressState extends BaseRouteState {
 export class CompletedState extends BaseRouteState {
   code: RoutingRouteStatus = 'completed';
 
-  protected toInProgress(context: RouteStatusTransitionContext): RouteStatusUpdate {
+  protected toInProgress(
+    context: RouteStatusTransitionContext,
+  ): RouteStatusUpdate {
     return {
       status: 'in_progress',
       startedAt: context.now,
@@ -87,7 +95,9 @@ export class CompletedState extends BaseRouteState {
 export class CancelledState extends BaseRouteState {
   code: RoutingRouteStatus = 'cancelled';
 
-  protected toInProgress(context: RouteStatusTransitionContext): RouteStatusUpdate {
+  protected toInProgress(
+    context: RouteStatusTransitionContext,
+  ): RouteStatusUpdate {
     return {
       status: 'in_progress',
       startedAt: context.now,

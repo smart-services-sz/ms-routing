@@ -1,5 +1,13 @@
-import { HttpException, HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  HttpException,
+  ForbiddenException,
+  HttpStatus,
+  Inject,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
+import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SimulateRoutingDto } from './dto/simulate-routing.dto';
 import { UpsertRoutingRulesDto } from './dto/upsert-routing-rules.dto';
@@ -20,6 +28,88 @@ import { firstValueFrom, timeout } from 'rxjs';
 import { RoutingPlannerContext } from './patterns/strategy/routing-planner.context';
 import { RouteDraft } from './patterns/strategy/route-optimization.types';
 import { RouteLifecycleContext } from './patterns/state/route-lifecycle.context';
+
+type RoutingRulesSnapshot = {
+  categoryRules: Array<{
+    categoria: string;
+    cupoDiario: number;
+    pesoPrioridad?: number | null;
+  }>;
+  crews: Array<{
+    crewId: string;
+    userId?: string;
+    nombre?: string | null;
+    userName?: string | null;
+    maxReclamosDiarios: number;
+    allowedCategorias: string[];
+    allowedZoneIds: string[];
+    startLat?: number | null;
+    startLng?: number | null;
+  }>;
+  zones: Array<{
+    id: string;
+    nombre?: string | null;
+    minLat: number;
+    maxLat: number;
+    minLng: number;
+    maxLng: number;
+  }>;
+};
+
+type ReclamoRoutingResponse = {
+  id: string;
+  categoria: ReclamoItem['categoria'];
+  prioridad: ReclamoItem['prioridad'];
+  estado?: 'pendiente' | 'en_proceso' | 'resuelto' | 'rechazado' | 'cerrado';
+  municipalityId?: string | null;
+  areaId?: string | null;
+  lat: number | string;
+  lng: number | string;
+  direccion?: string | null;
+};
+
+type ReclamosFindAllResponse = {
+  items: ReclamoRoutingResponse[];
+  pagination?: { hasNextPage?: boolean };
+};
+
+type ClaimSelectionFilters = {
+  statuses: Array<
+    'pendiente' | 'en_proceso' | 'resuelto' | 'rechazado' | 'cerrado'
+  >;
+  priorities: ReclamoItem['prioridad'][];
+  categories: ReclamoItem['categoria'][];
+  municipalityId?: string;
+  areaId?: string;
+};
+
+type RoutingActionName =
+  | 'plan.generated'
+  | 'plan.confirmed'
+  | 'route.status_changed'
+  | 'intervention.registered'
+  | 'evidence.attached';
+
+type RoutingHistoryWriter = {
+  routingActionHistory: {
+    create: (args: {
+      data: {
+        action: RoutingActionName;
+        planId?: string;
+        routeId?: string;
+        stopId?: string;
+        interventionId?: string;
+        evidenceId?: string;
+        reclamoId?: string;
+        actorId?: string;
+        previousStatus?: string;
+        newStatus?: string;
+        reason?: string;
+        metadata?: Prisma.InputJsonValue;
+      };
+    }) => Promise<unknown>;
+  };
+};
 
 @Injectable()
 export class RoutingService {
@@ -46,7 +136,10 @@ export class RoutingService {
       return {
         crewId: assigneeId,
         nombre: crew.userName ?? crew.nombre ?? assigneeId,
-        maxReclamosDiarios: Math.min(crew.maxReclamosDiarios, this.MAX_CLAIMS_PER_ROUTE),
+        maxReclamosDiarios: Math.min(
+          crew.maxReclamosDiarios,
+          this.MAX_CLAIMS_PER_ROUTE,
+        ),
         allowedCategorias: crew.allowedCategorias,
         allowedZoneIds: crew.allowedZoneIds ?? [],
         startLat: crew.startLat,
@@ -92,9 +185,11 @@ export class RoutingService {
     return { status: 'ok', message: 'Reglas de ruteo actualizadas' };
   }
 
-  async getRules() {
+  async getRules(): Promise<{ status: 'ok'; data: RoutingRulesSnapshot }> {
     const [categoryRules, crews, zones] = await Promise.all([
-      this.prisma.routingCategoryRule.findMany({ orderBy: { categoria: 'asc' } }),
+      this.prisma.routingCategoryRule.findMany({
+        orderBy: { categoria: 'asc' },
+      }),
       this.prisma.routingCrewRule.findMany({ orderBy: { crewId: 'asc' } }),
       this.prisma.routingZoneRule.findMany({ orderBy: { id: 'asc' } }),
     ]);
@@ -118,7 +213,7 @@ export class RoutingService {
           startLat: c.startLat,
           startLng: c.startLng,
         })),
-        zones: zones,
+        zones,
       },
     };
   }
@@ -165,53 +260,74 @@ export class RoutingService {
       // --- Expire stale reservations before selecting candidates ---
       await this.expireStaleReservations();
 
-      const result = await this.buildSimulation(payload, true, requestRecord?.id ?? null);
+      const result = await this.buildSimulation(
+        payload,
+        true,
+        requestRecord?.id ?? null,
+      );
 
       if (requestRecord && idempotencyKey) {
         await this.prisma.routingGenerationRequest.update({
           where: { idempotencyKey },
-          data: { status: 'completed', response: result as unknown as object, planId: result.savedPlanId ?? undefined },
+          data: {
+            status: 'completed',
+            response: result as unknown as Prisma.InputJsonValue,
+            planId: result.savedPlanId ?? undefined,
+          },
         });
       }
 
       return result;
     } catch (err) {
       if (requestRecord && idempotencyKey) {
-        await this.prisma.routingGenerationRequest.update({
-          where: { idempotencyKey },
-          data: { status: 'failed' },
-        }).catch(() => { /* swallow to surface original error */ });
+        await this.prisma.routingGenerationRequest
+          .update({
+            where: { idempotencyKey },
+            data: { status: 'failed' },
+          })
+          .catch(() => {
+            /* swallow to surface original error */
+          });
       }
       throw err;
     }
   }
 
   async getPlan(id: string) {
-    const plan = await this.prisma.routingPlan.findUnique({
-      where: { id },
-      include: {
-        routes: {
-          include: {
-            stops: {
-              orderBy: { sequence: 'asc' },
-            },
-            interventions: {
-              include: {
-                evidences: {
-                  orderBy: { createdAt: 'asc' },
-                },
+    const [plan, actionHistory] = await Promise.all([
+      this.prisma.routingPlan.findUnique({
+        where: { id },
+        include: {
+          routes: {
+            include: {
+              stops: {
+                orderBy: { sequence: 'asc' },
               },
-              orderBy: { createdAt: 'asc' },
+              interventions: {
+                include: {
+                  evidences: {
+                    orderBy: { createdAt: 'asc' },
+                  },
+                },
+                orderBy: { createdAt: 'asc' },
+              },
             },
+            orderBy: { createdAt: 'asc' },
           },
-          orderBy: { createdAt: 'asc' },
+          unassigned: true,
         },
-        unassigned: true,
-      },
-    });
+      }),
+      this.prisma.routingActionHistory.findMany({
+        where: { planId: id },
+        orderBy: { createdAt: 'asc' },
+      }),
+    ]);
 
     if (!plan) {
-      throw new HttpException('Plan de ruteo no encontrado', HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        'Plan de ruteo no encontrado',
+        HttpStatus.NOT_FOUND,
+      );
     }
 
     return {
@@ -223,6 +339,7 @@ export class RoutingService {
         summary: plan.summary,
         routes: plan.routes,
         unassigned: plan.unassigned,
+        actionHistory,
       },
     };
   }
@@ -259,7 +376,10 @@ export class RoutingService {
         updatedAt: plan.updatedAt.toISOString(),
         totalRoutes: plan._count.routes,
         totalUnassigned: plan._count.unassigned,
-        totalAssigned: plan.routes.reduce((acc, route) => acc + route.assignedClaims, 0),
+        totalAssigned: plan.routes.reduce(
+          (acc, route) => acc + route.assignedClaims,
+          0,
+        ),
         routes: plan.routes,
       })),
     };
@@ -271,7 +391,10 @@ export class RoutingService {
       select: { id: true, status: true },
     });
     if (!plan) {
-      throw new HttpException('Plan de ruteo no encontrado', HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        'Plan de ruteo no encontrado',
+        HttpStatus.NOT_FOUND,
+      );
     }
     if (plan.status === 'confirmed') {
       return { status: 'ok', message: 'Plan ya estaba confirmado' };
@@ -336,15 +459,29 @@ export class RoutingService {
           expiresAt: null,
         },
       });
+
+      await this.recordAction(tx, {
+        action: 'plan.confirmed',
+        planId: id,
+        previousStatus: plan.status,
+        newStatus: 'confirmed',
+        metadata: { claimCount: claimIds.length },
+      });
     });
 
     return { status: 'ok', message: 'Plan confirmado correctamente' };
   }
 
   async deletePlan(id: string) {
-    const exists = await this.prisma.routingPlan.findUnique({ where: { id }, select: { id: true } });
+    const exists = await this.prisma.routingPlan.findUnique({
+      where: { id },
+      select: { id: true },
+    });
     if (!exists) {
-      throw new HttpException('Plan de ruteo no encontrado', HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        'Plan de ruteo no encontrado',
+        HttpStatus.NOT_FOUND,
+      );
     }
 
     await this.prisma.$transaction(async (tx) => {
@@ -380,9 +517,14 @@ export class RoutingService {
   }
 
   async getAreaPlan(id: string) {
-    const plan = await this.prisma.routingAreaPlan.findUnique({ where: { id } });
+    const plan = await this.prisma.routingAreaPlan.findUnique({
+      where: { id },
+    });
     if (!plan) {
-      throw new HttpException('Plan por area no encontrado', HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        'Plan por area no encontrado',
+        HttpStatus.NOT_FOUND,
+      );
     }
 
     return {
@@ -403,8 +545,14 @@ export class RoutingService {
             originAddress: payload.originAddress,
             originLat: payload.originLat,
             originLng: payload.originLng,
-            dailyByUser: Math.min(payload.dailyByUser, this.MAX_CLAIMS_PER_ROUTE),
-            dailyByCategory: Math.min(payload.dailyByCategory, this.MAX_CLAIMS_PER_ROUTE),
+            dailyByUser: Math.min(
+              payload.dailyByUser,
+              this.MAX_CLAIMS_PER_ROUTE,
+            ),
+            dailyByCategory: Math.min(
+              payload.dailyByCategory,
+              this.MAX_CLAIMS_PER_ROUTE,
+            ),
           },
           create: {
             id: payload.id,
@@ -415,8 +563,14 @@ export class RoutingService {
             originAddress: payload.originAddress,
             originLat: payload.originLat,
             originLng: payload.originLng,
-            dailyByUser: Math.min(payload.dailyByUser, this.MAX_CLAIMS_PER_ROUTE),
-            dailyByCategory: Math.min(payload.dailyByCategory, this.MAX_CLAIMS_PER_ROUTE),
+            dailyByUser: Math.min(
+              payload.dailyByUser,
+              this.MAX_CLAIMS_PER_ROUTE,
+            ),
+            dailyByCategory: Math.min(
+              payload.dailyByCategory,
+              this.MAX_CLAIMS_PER_ROUTE,
+            ),
           },
         })
       : await this.prisma.routingAreaPlan.create({
@@ -428,8 +582,14 @@ export class RoutingService {
             originAddress: payload.originAddress,
             originLat: payload.originLat,
             originLng: payload.originLng,
-            dailyByUser: Math.min(payload.dailyByUser, this.MAX_CLAIMS_PER_ROUTE),
-            dailyByCategory: Math.min(payload.dailyByCategory, this.MAX_CLAIMS_PER_ROUTE),
+            dailyByUser: Math.min(
+              payload.dailyByUser,
+              this.MAX_CLAIMS_PER_ROUTE,
+            ),
+            dailyByCategory: Math.min(
+              payload.dailyByCategory,
+              this.MAX_CLAIMS_PER_ROUTE,
+            ),
           },
         });
 
@@ -440,9 +600,15 @@ export class RoutingService {
   }
 
   async deleteAreaPlan(id: string) {
-    const exists = await this.prisma.routingAreaPlan.findUnique({ where: { id }, select: { id: true } });
+    const exists = await this.prisma.routingAreaPlan.findUnique({
+      where: { id },
+      select: { id: true },
+    });
     if (!exists) {
-      throw new HttpException('Plan por area no encontrado', HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        'Plan por area no encontrado',
+        HttpStatus.NOT_FOUND,
+      );
     }
 
     await this.prisma.routingAreaPlan.delete({ where: { id } });
@@ -456,7 +622,10 @@ export class RoutingService {
   async getAssignedRoute(payload: GetAssignedRouteDto) {
     const assigneeId = payload.userId ?? payload.crewId;
     if (!assigneeId) {
-      throw new HttpException('Debe enviar userId o crewId', HttpStatus.BAD_REQUEST);
+      throw new HttpException(
+        'Debe enviar userId o crewId',
+        HttpStatus.BAD_REQUEST,
+      );
     }
 
     const route = await this.prisma.routingRoute.findFirst({
@@ -513,6 +682,7 @@ export class RoutingService {
       where: { id: payload.routeId },
       select: {
         id: true,
+        crewId: true,
         status: true,
         startedAt: true,
       },
@@ -520,6 +690,14 @@ export class RoutingService {
 
     if (!route) {
       throw new HttpException('Ruta no encontrada', HttpStatus.NOT_FOUND);
+    }
+
+    if (
+      payload.actorId &&
+      !payload.actorIsAdmin &&
+      route.crewId !== payload.actorId
+    ) {
+      throw new ForbiddenException('El actor no pertenece a la ruta indicada');
     }
 
     const now = new Date();
@@ -530,9 +708,18 @@ export class RoutingService {
       now,
     });
 
-    await this.prisma.routingRoute.update({
-      where: { id: payload.routeId },
-      data,
+    await this.prisma.$transaction(async (tx) => {
+      await tx.routingRoute.update({
+        where: { id: payload.routeId },
+        data,
+      });
+
+      await this.recordAction(tx, {
+        action: 'route.status_changed',
+        routeId: payload.routeId,
+        previousStatus: route.status,
+        newStatus: data.status,
+      });
     });
 
     return {
@@ -550,16 +737,32 @@ export class RoutingService {
     });
 
     if (!stop) {
-      throw new HttpException('Punto de ruta no encontrado', HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        'Punto de ruta no encontrado',
+        HttpStatus.NOT_FOUND,
+      );
     }
 
     if (stop.routeId !== payload.routeId) {
-      throw new HttpException('El punto indicado no pertenece a la ruta', HttpStatus.BAD_REQUEST);
+      throw new HttpException(
+        'El punto indicado no pertenece a la ruta',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    if (
+      payload.actorId &&
+      !payload.actorIsAdmin &&
+      stop.route.crewId !== payload.actorId
+    ) {
+      throw new ForbiddenException('El actor no pertenece a la ruta indicada');
     }
 
     const now = new Date();
     const nextStopStatus = this.resolveStopStatusByIntervention(payload.result);
-    const nextClaimStatus = this.resolveClaimStatusByIntervention(payload.result);
+    const nextClaimStatus = this.resolveClaimStatusByIntervention(
+      payload.result,
+    );
 
     const intervention = await this.prisma.$transaction(async (tx) => {
       const updatedIntervention = await tx.routingIntervention.upsert({
@@ -617,7 +820,9 @@ export class RoutingService {
 
       if (pendingStops === 0) {
         const effectiveStartedAt =
-          stop.route.status === 'assigned' ? stop.route.startedAt ?? now : stop.route.startedAt;
+          stop.route.status === 'assigned'
+            ? (stop.route.startedAt ?? now)
+            : stop.route.startedAt;
 
         const completedTransition = this.routeLifecycleContext.transition({
           currentStatus:
@@ -635,10 +840,31 @@ export class RoutingService {
         });
       }
 
+      await this.recordAction(tx, {
+        action: 'intervention.registered',
+        routeId: payload.routeId,
+        stopId: payload.stopId,
+        interventionId: updatedIntervention.id,
+        reclamoId: stop.reclamoId,
+        actorId: payload.performedBy,
+        previousStatus: stop.status,
+        newStatus: nextStopStatus,
+        reason: payload.observation,
+        metadata: {
+          result: payload.result,
+          claimStatus: nextClaimStatus,
+        },
+      });
+
       return updatedIntervention;
     });
 
-    await this.syncClaimFromIntervention(stop.reclamoId, nextClaimStatus, payload);
+    await this.syncClaimFromIntervention(
+      stop.reclamoId,
+      nextClaimStatus,
+      payload,
+      intervention.id,
+    );
 
     return {
       status: 'ok',
@@ -653,24 +879,61 @@ export class RoutingService {
       select: {
         id: true,
         reclamoId: true,
+        route: {
+          select: { crewId: true },
+        },
       },
     });
 
     if (!intervention) {
-      throw new HttpException('Intervencion no encontrada', HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        'Intervencion no encontrada',
+        HttpStatus.NOT_FOUND,
+      );
     }
 
-    const evidence = await this.prisma.routingInterventionEvidence.create({
-      data: {
-        interventionId: payload.interventionId,
-        tipo: payload.tipo,
-        nombreArchivo: payload.nombreArchivo,
-        urlArchivo: payload.urlArchivo,
-        descripcion: payload.descripcion,
-      },
+    if (
+      payload.actorId &&
+      !payload.actorIsAdmin &&
+      intervention.route.crewId !== payload.actorId
+    ) {
+      throw new ForbiddenException(
+        'El actor no pertenece a la ruta de la intervencion',
+      );
+    }
+
+    const evidence = await this.prisma.$transaction(async (tx) => {
+      const createdEvidence = await tx.routingInterventionEvidence.create({
+        data: {
+          interventionId: payload.interventionId,
+          tipo: payload.tipo,
+          nombreArchivo: payload.nombreArchivo,
+          urlArchivo: payload.urlArchivo,
+          descripcion: payload.descripcion,
+        },
+      });
+
+      await this.recordAction(tx, {
+        action: 'evidence.attached',
+        interventionId: intervention.id,
+        evidenceId: createdEvidence.id,
+        reclamoId: intervention.reclamoId,
+        reason: payload.descripcion,
+        metadata: {
+          tipo: payload.tipo,
+          nombreArchivo: payload.nombreArchivo,
+        },
+      });
+
+      return createdEvidence;
     });
 
-    await this.syncClaimEvidenceObservation(intervention.reclamoId, payload, evidence.createdAt);
+    await this.syncClaimEvidenceObservation(
+      intervention.reclamoId,
+      payload,
+      evidence.createdAt,
+      evidence.id,
+    );
 
     return {
       status: 'ok',
@@ -695,13 +958,20 @@ export class RoutingService {
     });
   }
 
-  private async buildSimulation(payload: SimulateRoutingDto, forcePersist: boolean, generationRequestId: string | null) {
+  private async buildSimulation(
+    payload: SimulateRoutingDto,
+    forcePersist: boolean,
+    generationRequestId: string | null,
+  ) {
     const maxFetch = payload.maxFetch ?? 200;
-    const planningDate = payload.planningDate ?? new Date().toISOString().slice(0, 10);
+    const planningDate =
+      payload.planningDate ?? new Date().toISOString().slice(0, 10);
     const useGoogleOptimization = payload.useGoogleOptimization ?? true;
     const persistPlan = forcePersist || payload.persistPlan === true;
 
-    const rules = payload.overrideRules ?? (await this.getRules()).data;
+    const rules = payload.overrideRules
+      ? this.toRulesSnapshot(payload.overrideRules)
+      : (await this.getRules()).data;
     if (!rules.crews.length || !rules.categoryRules.length) {
       throw new HttpException(
         'No hay reglas de ruteo configuradas (categoryRules/crews)',
@@ -709,7 +979,8 @@ export class RoutingService {
       );
     }
 
-    const fetchedClaims = await this.fetchClaims(maxFetch);
+    const selectionFilters = this.resolveSelectionFilters(payload, rules);
+    const fetchedClaims = await this.fetchClaims(maxFetch, selectionFilters);
 
     // Exclude claims already assigned to a confirmed plan or actively reserved by another run
     const blockedClaimIds = forcePersist
@@ -717,32 +988,46 @@ export class RoutingService {
       : new Set<string>();
 
     const validClaims = fetchedClaims.filter(
-      (c) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && !blockedClaimIds.has(c.id),
+      (c) =>
+        Number.isFinite(c.lat) &&
+        Number.isFinite(c.lng) &&
+        !blockedClaimIds.has(c.id),
     );
 
     const zoneByClaimId = new Map<string, string | null>();
     for (const claim of validClaims) {
-      const zoneId = this.findZoneForClaim(claim.lat, claim.lng, rules.zones ?? []);
+      const zoneId = this.findZoneForClaim(
+        claim.lat,
+        claim.lng,
+        rules.zones ?? [],
+      );
       zoneByClaimId.set(claim.id, zoneId);
     }
 
     const categoryQuota = new Map<string, number>();
+    const categoryPriorityWeight = new Map<string, number>();
     for (const rule of rules.categoryRules) {
       categoryQuota.set(rule.categoria, rule.cupoDiario);
+      categoryPriorityWeight.set(rule.categoria, rule.pesoPrioridad ?? 1);
     }
 
     const categoryConsumption: Record<string, number> = {};
     const unassignedByReason: Record<string, number> = {};
 
     const prioritizedClaims = [...validClaims].sort((a, b) => {
-      const pDiff = this.priorityWeight(b.prioridad) - this.priorityWeight(a.prioridad);
+      const pDiff =
+        this.priorityScore(b, categoryPriorityWeight) -
+        this.priorityScore(a, categoryPriorityWeight);
       if (pDiff !== 0) {
         return pDiff;
       }
       return a.id.localeCompare(b.id);
     });
 
-    const routeBuilders = rules.crews.map((crew) => ({ crew, claims: [] as ReclamoItem[] }));
+    const routeBuilders = rules.crews.map((crew) => ({
+      crew,
+      claims: [] as ReclamoItem[],
+    }));
     const unassigned: Array<{ reclamoId: string; reason: string }> = [];
 
     for (const claim of prioritizedClaims) {
@@ -750,7 +1035,12 @@ export class RoutingService {
       const consumed = categoryConsumption[claim.categoria] ?? 0;
 
       if (consumed >= quota) {
-        this.pushUnassigned(unassigned, unassignedByReason, claim.id, 'category_quota_reached');
+        this.pushUnassigned(
+          unassigned,
+          unassignedByReason,
+          claim.id,
+          'category_quota_reached',
+        );
         continue;
       }
 
@@ -769,7 +1059,12 @@ export class RoutingService {
       });
 
       if (!candidates.length) {
-        this.pushUnassigned(unassigned, unassignedByReason, claim.id, 'no_eligible_crew');
+        this.pushUnassigned(
+          unassigned,
+          unassignedByReason,
+          claim.id,
+          'no_eligible_crew',
+        );
         continue;
       }
 
@@ -781,24 +1076,37 @@ export class RoutingService {
     let routes: RouteDraft[] = routeBuilders
       .filter((r) => r.claims.length > 0)
       .map((builder) =>
-        this.buildRoute(builder.crew, builder.claims, zoneByClaimId, payload.originLat, payload.originLng),
+        this.buildRoute(
+          builder.crew,
+          builder.claims,
+          zoneByClaimId,
+          categoryPriorityWeight,
+          payload.originLat,
+          payload.originLng,
+        ),
       );
 
     let optimizedRoutes = 0;
     let failedRoutes = 0;
 
     if (useGoogleOptimization) {
-      const optimizedResult = await this.routingPlannerContext.optimize(routes, {
-        useGoogleOptimization,
-        originLat: payload.originLat,
-        originLng: payload.originLng,
-      });
+      const optimizedResult = await this.routingPlannerContext.optimize(
+        routes,
+        {
+          useGoogleOptimization,
+          originLat: payload.originLat,
+          originLng: payload.originLng,
+        },
+      );
       routes = optimizedResult.routes;
       optimizedRoutes = optimizedResult.optimizedRoutes;
       failedRoutes = optimizedResult.failedRoutes;
     }
 
-    const totalAssigned = routes.reduce((acc, route) => acc + route.assignedClaims, 0);
+    const totalAssigned = routes.reduce(
+      (acc, route) => acc + route.assignedClaims,
+      0,
+    );
 
     const summary: SimulationSummary = {
       totalFetched: fetchedClaims.length,
@@ -816,7 +1124,9 @@ export class RoutingService {
 
     let savedPlanId: string | null = null;
     if (persistPlan) {
-      const assignedClaimIds = routes.flatMap((r) => r.stops.map((s) => s.reclamoId));
+      const assignedClaimIds = routes.flatMap((r) =>
+        r.stops.map((s) => s.reclamoId),
+      );
       const plan = await this.persistPlanWithReservation(
         planningDate,
         summary,
@@ -839,27 +1149,36 @@ export class RoutingService {
     };
   }
 
-  private async fetchClaims(maxFetch: number): Promise<ReclamoItem[]> {
+  private async fetchClaims(
+    maxFetch: number,
+    filters: ClaimSelectionFilters,
+  ): Promise<ReclamoItem[]> {
     const claims: ReclamoItem[] = [];
     const limitPerPage = 100;
     let page = 1;
+    const remoteFilters = this.toRemoteClaimFilters(filters);
 
     while (claims.length < maxFetch) {
       const limit = Math.min(limitPerPage, maxFetch - claims.length);
       const response = await firstValueFrom(
         this.natsClient
-          .send<{ items: any[]; pagination: { hasNextPage: boolean } }>('reclamos.find-all', {
+          .send<ReclamosFindAllResponse>('reclamos.find-all', {
             page,
             limit,
             sortDirection: -1,
+            ...remoteFilters,
           })
           .pipe(timeout(12000)),
       );
 
-      const items = response?.items ?? [];
-      if (!items.length) {
+      const fetchedItems = response?.items ?? [];
+      if (!fetchedItems.length) {
         break;
       }
+
+      const items = fetchedItems.filter((item) =>
+        this.matchesSelectionFilters(item, filters),
+      );
 
       claims.push(
         ...items.map((it) => ({
@@ -882,6 +1201,97 @@ export class RoutingService {
     return claims;
   }
 
+  private resolveSelectionFilters(
+    payload: SimulateRoutingDto,
+    rules: RoutingRulesSnapshot,
+  ): ClaimSelectionFilters {
+    return {
+      statuses: payload.claimStatuses ?? [],
+      priorities: payload.priorities ?? [],
+      categories:
+        payload.categories ??
+        rules.categoryRules.map(
+          (rule) => rule.categoria as ReclamoItem['categoria'],
+        ),
+      municipalityId: payload.municipalityId,
+      areaId: payload.areaId,
+    };
+  }
+
+  private toRemoteClaimFilters(filters: ClaimSelectionFilters): {
+    estado?: ClaimSelectionFilters['statuses'][number];
+    categoria?: ReclamoItem['categoria'];
+    prioridad?: ReclamoItem['prioridad'];
+    municipalityId?: string;
+    areaId?: string;
+  } {
+    return {
+      estado: filters.statuses.length === 1 ? filters.statuses[0] : undefined,
+      categoria:
+        filters.categories.length === 1 ? filters.categories[0] : undefined,
+      prioridad:
+        filters.priorities.length === 1 ? filters.priorities[0] : undefined,
+      municipalityId: filters.municipalityId,
+      areaId: filters.areaId,
+    };
+  }
+
+  private matchesSelectionFilters(
+    claim: ReclamoRoutingResponse,
+    filters: ClaimSelectionFilters,
+  ): boolean {
+    if (filters.statuses.length > 0 && claim.estado) {
+      if (!filters.statuses.includes(claim.estado)) {
+        return false;
+      }
+    }
+
+    if (
+      filters.categories.length > 0 &&
+      !filters.categories.includes(claim.categoria)
+    ) {
+      return false;
+    }
+
+    if (
+      filters.priorities.length > 0 &&
+      !filters.priorities.includes(claim.prioridad)
+    ) {
+      return false;
+    }
+
+    if (
+      filters.municipalityId &&
+      claim.municipalityId !== filters.municipalityId
+    ) {
+      return false;
+    }
+
+    if (filters.areaId && claim.areaId !== filters.areaId) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private toRulesSnapshot(rules: UpsertRoutingRulesDto): RoutingRulesSnapshot {
+    return {
+      categoryRules: rules.categoryRules,
+      crews: rules.crews.map((crew) => ({
+        crewId: crew.crewId ?? crew.userId ?? '',
+        userId: crew.userId,
+        nombre: crew.nombre,
+        userName: crew.userName,
+        maxReclamosDiarios: crew.maxReclamosDiarios,
+        allowedCategorias: crew.allowedCategorias,
+        allowedZoneIds: crew.allowedZoneIds ?? [],
+        startLat: crew.startLat,
+        startLng: crew.startLng,
+      })),
+      zones: rules.zones ?? [],
+    };
+  }
+
   private buildRoute(
     crew: {
       crewId: string;
@@ -892,10 +1302,15 @@ export class RoutingService {
     },
     claims: ReclamoItem[],
     zoneByClaimId: Map<string, string | null>,
+    categoryPriorityWeight: Map<string, number>,
     originLat?: number,
     originLng?: number,
   ) {
-    const sorted = [...claims].sort((a, b) => this.priorityWeight(b.prioridad) - this.priorityWeight(a.prioridad));
+    const sorted = [...claims].sort(
+      (a, b) =>
+        this.priorityScore(b, categoryPriorityWeight) -
+        this.priorityScore(a, categoryPriorityWeight),
+    );
 
     let prevLat = crew.startLat ?? originLat ?? sorted[0].lat;
     let prevLng = crew.startLng ?? originLng ?? sorted[0].lng;
@@ -903,8 +1318,12 @@ export class RoutingService {
     let totalDuration = 0;
 
     const stops = sorted.map((claim, index) => {
-      const distance = index === 0 ? 0 : this.haversineKm(prevLat, prevLng, claim.lat, claim.lng);
-      const duration = index === 0 ? 0 : Math.max(1, Math.round((distance / 30) * 60));
+      const distance =
+        index === 0
+          ? 0
+          : this.haversineKm(prevLat, prevLng, claim.lat, claim.lng);
+      const duration =
+        index === 0 ? 0 : Math.max(1, Math.round((distance / 30) * 60));
 
       totalDistance += distance;
       totalDuration += duration;
@@ -994,7 +1413,7 @@ export class RoutingService {
         data: {
           planningDate: new Date(`${planningDate}T00:00:00.000Z`),
           status: 'proposed',
-          summary: summary as unknown as object,
+          summary: summary as unknown as Prisma.InputJsonValue,
           routes: {
             create: routes.map((route) => ({
               crewId: route.crewId,
@@ -1032,7 +1451,31 @@ export class RoutingService {
         select: { id: true },
       });
 
-      // 2. Reserve each assigned claim atomically
+      // 2. Verify no claim was already assigned or reserved by another run.
+      const conflicts = assignedClaimIds.length
+        ? await tx.routingClaimAllocation.findMany({
+            where: {
+              claimId: { in: assignedClaimIds },
+              OR: [
+                { state: 'assigned' },
+                {
+                  state: 'reserved',
+                  expiresAt: { gt: now },
+                },
+              ],
+            },
+            select: { claimId: true },
+          })
+        : [];
+
+      if (conflicts.length > 0) {
+        throw new HttpException(
+          `${conflicts.length} reclamo(s) ya fueron asignados o reservados por otro plan. Regenera la corrida para obtener candidatos actualizados.`,
+          HttpStatus.CONFLICT,
+        );
+      }
+
+      // 3. Reserve each assigned claim atomically
       // Only reserve claims that are currently 'available' (not already assigned/reserved)
       for (const claimId of assignedClaimIds) {
         await tx.routingClaimAllocation.upsert({
@@ -1056,23 +1499,6 @@ export class RoutingService {
         });
       }
 
-      // 3. Verify no claim was already assigned to another confirmed plan
-      const conflicts = await tx.routingClaimAllocation.findMany({
-        where: {
-          claimId: { in: assignedClaimIds },
-          state: 'assigned',
-          assignedPlanId: { not: plan.id },
-        },
-        select: { claimId: true },
-      });
-
-      if (conflicts.length > 0) {
-        throw new HttpException(
-          `${conflicts.length} reclamo(s) ya fueron asignados a otro plan confirmado. Regenera la corrida para obtener candidatos actualizados.`,
-          HttpStatus.CONFLICT,
-        );
-      }
-
       // 4. Link request record to plan if provided
       if (generationRequestId) {
         await tx.routingGenerationRequest.update({
@@ -1080,6 +1506,18 @@ export class RoutingService {
           data: { planId: plan.id },
         });
       }
+
+      await this.recordAction(tx, {
+        action: 'plan.generated',
+        planId: plan.id,
+        newStatus: 'proposed',
+        metadata: {
+          planningDate,
+          routeCount: routes.length,
+          assignedClaimCount: assignedClaimIds.length,
+          unassignedCount: unassigned.length,
+        },
+      });
 
       return plan;
     });
@@ -1115,7 +1553,7 @@ export class RoutingService {
       data: {
         planningDate: new Date(`${planningDate}T00:00:00.000Z`),
         status: 'proposed',
-        summary: summary as unknown as object,
+        summary: summary as unknown as Prisma.InputJsonValue,
         routes: {
           create: routes.map((route) => ({
             crewId: route.crewId,
@@ -1154,7 +1592,9 @@ export class RoutingService {
     });
   }
 
-  private resolveStopStatusByIntervention(result: InterventionResult): RoutingStopStatus {
+  private resolveStopStatusByIntervention(
+    result: InterventionResult,
+  ): RoutingStopStatus {
     if (result === 'resuelto') {
       return 'visitado';
     }
@@ -1188,11 +1628,16 @@ export class RoutingService {
     reclamoId: string,
     estado: 'pendiente' | 'en_proceso' | 'resuelto' | 'rechazado' | 'cerrado',
     payload: RegisterInterventionDto,
+    interventionId: string,
   ): Promise<void> {
     const observationText = [
       `Intervencion de ruta: ${payload.result}`,
-      payload.observation?.trim() ? `Detalle: ${payload.observation.trim()}` : null,
-      payload.performedBy?.trim() ? `Ejecutado por: ${payload.performedBy.trim()}` : null,
+      payload.observation?.trim()
+        ? `Detalle: ${payload.observation.trim()}`
+        : null,
+      payload.performedBy?.trim()
+        ? `Ejecutado por: ${payload.performedBy.trim()}`
+        : null,
     ]
       .filter(Boolean)
       .join(' | ');
@@ -1204,6 +1649,9 @@ export class RoutingService {
           data: {
             estado,
             observaciones: observationText,
+            actorId: payload.actorId ?? payload.performedBy,
+            origen: 'routing',
+            referenciaId: interventionId,
           },
         })
         .pipe(timeout(12000)),
@@ -1214,6 +1662,7 @@ export class RoutingService {
     reclamoId: string,
     payload: AttachInterventionEvidenceDto,
     createdAt: Date,
+    evidenceId: string,
   ): Promise<void> {
     const observation =
       `Evidencia adjuntada (${payload.tipo}) - ${payload.nombreArchivo} - ` +
@@ -1225,6 +1674,9 @@ export class RoutingService {
           id: reclamoId,
           data: {
             observaciones: observation,
+            actorId: payload.actorId,
+            origen: 'routing',
+            referenciaId: evidenceId,
           },
         })
         .pipe(timeout(12000)),
@@ -1243,7 +1695,12 @@ export class RoutingService {
     }>,
   ): string | null {
     for (const zone of zones) {
-      if (lat >= zone.minLat && lat <= zone.maxLat && lng >= zone.minLng && lng <= zone.maxLng) {
+      if (
+        lat >= zone.minLat &&
+        lat <= zone.maxLat &&
+        lng >= zone.minLng &&
+        lng <= zone.maxLng
+      ) {
         return zone.id;
       }
     }
@@ -1256,7 +1713,57 @@ export class RoutingService {
     return 1;
   }
 
-  private haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  private priorityScore(
+    claim: Pick<ReclamoItem, 'categoria' | 'prioridad'>,
+    categoryPriorityWeight: Map<string, number>,
+  ): number {
+    return (
+      this.priorityWeight(claim.prioridad) *
+      (categoryPriorityWeight.get(claim.categoria) ?? 1)
+    );
+  }
+
+  private async recordAction(
+    writer: RoutingHistoryWriter,
+    params: {
+      action: RoutingActionName;
+      planId?: string;
+      routeId?: string;
+      stopId?: string;
+      interventionId?: string;
+      evidenceId?: string;
+      reclamoId?: string;
+      actorId?: string;
+      previousStatus?: string | null;
+      newStatus?: string | null;
+      reason?: string | null;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    await writer.routingActionHistory.create({
+      data: {
+        action: params.action,
+        planId: params.planId,
+        routeId: params.routeId,
+        stopId: params.stopId,
+        interventionId: params.interventionId,
+        evidenceId: params.evidenceId,
+        reclamoId: params.reclamoId,
+        actorId: params.actorId,
+        previousStatus: params.previousStatus ?? undefined,
+        newStatus: params.newStatus ?? undefined,
+        reason: params.reason ?? undefined,
+        metadata: params.metadata as Prisma.InputJsonValue | undefined,
+      },
+    });
+  }
+
+  private haversineKm(
+    lat1: number,
+    lon1: number,
+    lat2: number,
+    lon2: number,
+  ): number {
     const r = 6371;
     const dLat = ((lat2 - lat1) * Math.PI) / 180;
     const dLon = ((lon2 - lon1) * Math.PI) / 180;

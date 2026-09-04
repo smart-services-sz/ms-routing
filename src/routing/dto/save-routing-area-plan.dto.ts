@@ -1,4 +1,13 @@
-import { IsArray, IsInt, IsLatitude, IsLongitude, IsOptional, IsString, Max, Min } from 'class-validator';
+import {
+  IsArray,
+  IsInt,
+  IsLatitude,
+  IsLongitude,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 
 export class SaveRoutingAreaPlanDto {
   @IsOptional()

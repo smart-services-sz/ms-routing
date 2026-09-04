@@ -7,12 +7,12 @@ datasource db {
 }
 
 model RoutingCategoryRule {
-  id           String   @id @default(uuid()) @db.Uuid
-  categoria    String   @unique
-  cupoDiario   Int
-  pesoPrioridad Int     @default(1)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id            String   @id @default(uuid()) @db.Uuid
+  categoria     String   @unique
+  cupoDiario    Int
+  pesoPrioridad Int      @default(1)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
 
 model RoutingCrewRule {
@@ -57,31 +57,54 @@ model RoutingAreaPlan {
 }
 
 model RoutingPlan {
-  id           String            @id @default(uuid()) @db.Uuid
+  id           String              @id @default(uuid()) @db.Uuid
   planningDate DateTime
-  status       String            @default("proposed")
+  status       String              @default("proposed")
   summary      Json
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
   routes       RoutingRoute[]
   unassigned   RoutingUnassigned[]
 
   @@index([planningDate])
 }
 
+model RoutingActionHistory {
+  id             String   @id @default(uuid()) @db.Uuid
+  action         String
+  planId         String?  @db.Uuid
+  routeId        String?  @db.Uuid
+  stopId         String?  @db.Uuid
+  interventionId String?  @db.Uuid
+  evidenceId     String?  @db.Uuid
+  reclamoId      String?  @db.Uuid
+  actorId        String?
+  previousStatus String?
+  newStatus      String?
+  reason         String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  @@index([planId, createdAt])
+  @@index([routeId, createdAt])
+  @@index([stopId, createdAt])
+  @@index([reclamoId, createdAt])
+  @@index([action, createdAt])
+}
+
 model RoutingClaimAllocation {
-  id               String   @id @default(uuid()) @db.Uuid
-  claimId          String   @unique @db.Uuid
-  state            String   @default("available")
+  id               String    @id @default(uuid()) @db.Uuid
+  claimId          String    @unique @db.Uuid
+  state            String    @default("available")
   reservationToken String?
-  reservedByPlanId String?  @db.Uuid
+  reservedByPlanId String?   @db.Uuid
   reservedAt       DateTime?
   expiresAt        DateTime?
-  assignedPlanId   String?  @db.Uuid
+  assignedPlanId   String?   @db.Uuid
   assignedAt       DateTime?
   releasedAt       DateTime?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@index([state, expiresAt])
   @@index([reservedByPlanId])
@@ -89,33 +112,33 @@ model RoutingClaimAllocation {
 }
 
 model RoutingGenerationRequest {
-  id             String   @id @default(uuid()) @db.Uuid
-  idempotencyKey String   @unique
+  id             String    @id @default(uuid()) @db.Uuid
+  idempotencyKey String    @unique
   status         String
   planningDate   DateTime?
-  planId         String?  @db.Uuid
+  planId         String?   @db.Uuid
   response       Json?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   @@index([status, updatedAt])
 }
 
 model RoutingRoute {
-  id                 String        @id @default(uuid()) @db.Uuid
-  planId             String        @db.Uuid
+  id                 String                @id @default(uuid()) @db.Uuid
+  planId             String                @db.Uuid
   crewId             String
   nombre             String
-  status             String        @default("assigned")
-  assignedAt         DateTime      @default(now())
+  status             String                @default("assigned")
+  assignedAt         DateTime              @default(now())
   startedAt          DateTime?
   completedAt        DateTime?
   assignedClaims     Int
   maxReclamosDiarios Int
   totalDistanceKm    Float
   totalDurationMin   Int
-  createdAt          DateTime      @default(now())
-  plan               RoutingPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  createdAt          DateTime              @default(now())
+  plan               RoutingPlan           @relation(fields: [planId], references: [id], onDelete: Cascade)
   stops              RoutingStop[]
   interventions      RoutingIntervention[]
 
@@ -123,12 +146,12 @@ model RoutingRoute {
 }
 
 model RoutingStop {
-  id                      String       @id @default(uuid()) @db.Uuid
-  routeId                 String       @db.Uuid
+  id                      String               @id @default(uuid()) @db.Uuid
+  routeId                 String               @db.Uuid
   sequence                Int
-  status                  String       @default("pendiente")
+  status                  String               @default("pendiente")
   visitedAt               DateTime?
-  reclamoId               String       @db.Uuid
+  reclamoId               String               @db.Uuid
   categoria               String
   prioridad               String
   zoneId                  String?
@@ -137,8 +160,8 @@ model RoutingStop {
   direccion               String
   distanceFromPreviousKm  Float
   durationFromPreviousMin Int
-  createdAt               DateTime     @default(now())
-  route                   RoutingRoute @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  createdAt               DateTime             @default(now())
+  route                   RoutingRoute         @relation(fields: [routeId], references: [id], onDelete: Cascade)
   intervention            RoutingIntervention?
 
   @@index([routeId])
@@ -146,18 +169,18 @@ model RoutingStop {
 }
 
 model RoutingIntervention {
-  id          String                      @id @default(uuid()) @db.Uuid
-  routeId     String                      @db.Uuid
-  stopId      String                      @unique @db.Uuid
-  reclamoId   String                      @db.Uuid
+  id          String                        @id @default(uuid()) @db.Uuid
+  routeId     String                        @db.Uuid
+  stopId      String                        @unique @db.Uuid
+  reclamoId   String                        @db.Uuid
   result      String
   observation String?
   performedBy String?
   performedAt DateTime
-  createdAt   DateTime                    @default(now())
-  updatedAt   DateTime                    @updatedAt
-  route       RoutingRoute                @relation(fields: [routeId], references: [id], onDelete: Cascade)
-  stop        RoutingStop                 @relation(fields: [stopId], references: [id], onDelete: Cascade)
+  createdAt   DateTime                      @default(now())
+  updatedAt   DateTime                      @updatedAt
+  route       RoutingRoute                  @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  stop        RoutingStop                   @relation(fields: [stopId], references: [id], onDelete: Cascade)
   evidences   RoutingInterventionEvidence[]
 
   @@index([routeId])

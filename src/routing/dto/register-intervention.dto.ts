@@ -1,4 +1,11 @@
-import { IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsIn,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+} from 'class-validator';
 
 export class RegisterInterventionDto {
   @IsUUID('4')
@@ -8,7 +15,11 @@ export class RegisterInterventionDto {
   stopId!: string;
 
   @IsIn(['resuelto', 'no_resuelto', 'requiere_nueva_visita', 'no_corresponde'])
-  result!: 'resuelto' | 'no_resuelto' | 'requiere_nueva_visita' | 'no_corresponde';
+  result!:
+    | 'resuelto'
+    | 'no_resuelto'
+    | 'requiere_nueva_visita'
+    | 'no_corresponde';
 
   @IsOptional()
   @IsString()
@@ -18,4 +29,12 @@ export class RegisterInterventionDto {
   @IsOptional()
   @IsString()
   performedBy?: string;
+
+  @IsOptional()
+  @IsUUID('4')
+  actorId?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  actorIsAdmin?: boolean;
 }
