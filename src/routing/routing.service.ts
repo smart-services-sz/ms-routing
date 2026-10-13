@@ -6,7 +6,7 @@ import {
   Injectable,
   Logger,
 } from '@nestjs/common';
-import { ClientProxy } from '@nestjs/microservices';
+import { ClientProxy, RpcException } from '@nestjs/microservices';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SimulateRoutingDto } from './dto/simulate-routing.dto';
@@ -939,12 +939,27 @@ export class RoutingService {
       return updatedIntervention;
     });
 
-    await this.syncClaimFromIntervention(
-      stop.reclamoId,
-      nextClaimStatus,
-      payload,
-      intervention.id,
-    );
+    try {
+      await this.syncClaimFromIntervention(
+        stop.reclamoId,
+        nextClaimStatus,
+        payload,
+        intervention.id,
+      );
+    } catch (error: unknown) {
+      this.logger.error(
+        `Intervencion ${intervention.id} guardada en ruta ${stop.routeId}; fallo la sincronizacion del reclamo ${stop.reclamoId}`,
+        error instanceof Error ? error.stack : JSON.stringify(error),
+      );
+      throw new RpcException({
+        statusCode: HttpStatus.BAD_GATEWAY,
+        message: 'El trabajo fue registrado, pero fallo la sincronizacion del reclamo.',
+        interventionSaved: true,
+        interventionId: intervention.id,
+        routeId: stop.routeId,
+        stopId: stop.id,
+      });
+    }
 
     return {
       status: 'ok',

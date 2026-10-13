@@ -1,9 +1,10 @@
 import { HttpException, HttpStatus } from '@nestjs/common';
-import { ClientProxy } from '@nestjs/microservices';
+import { ClientProxy, RpcException } from '@nestjs/microservices';
 import { PrismaService } from '../prisma/prisma.service';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { RoutingPlannerContext } from './patterns/strategy/routing-planner.context';
 import { RouteLifecycleContext } from './patterns/state/route-lifecycle.context';
+import { RouteStateFactory } from './patterns/state/route-state.factory';
 import { RoutingService } from './routing.service';
 
 type GenerationRequestModelMock = {
@@ -59,13 +60,13 @@ type NatsClientMock = {
 
 function createService(
   prisma: PrismaMock,
-  natsClient: NatsClientMock = { send: jest.fn() },
+  natsClient: NatsClientMock = { send: jest.fn().mockReturnValue(of({ status: 'updated' })) },
 ): RoutingService {
   return new RoutingService(
     prisma as unknown as PrismaService,
     natsClient as unknown as ClientProxy,
     {} as RoutingPlannerContext,
-    {} as RouteLifecycleContext,
+    new RouteLifecycleContext(new RouteStateFactory()),
   );
 }
 
@@ -131,7 +132,11 @@ function createPrismaMock(tx = createTransactionMock()): PrismaMock {
 
 describe('RoutingService', () => {
   describe('agent execution', () => {
-    function executionService(routeStatus = 'in_progress', stopStatus = 'pendiente') {
+    function executionService(
+      routeStatus = 'in_progress',
+      stopStatus = 'pendiente',
+      natsClient: NatsClientMock = { send: jest.fn().mockReturnValue(of({ status: 'updated' })) },
+    ) {
       const tx = {
         ...createTransactionMock(),
         routingStop: {
@@ -153,13 +158,13 @@ describe('RoutingService', () => {
         },
         routingStop: {
           findUnique: jest.fn().mockResolvedValue({
-            id: 'stop-2', routeId: 'route-1', sequence: 2, status: stopStatus,
-            route: { crewId: 'agent-1', status: routeStatus, plan: { status: 'confirmed' } },
+            id: 'stop-2', routeId: 'route-1', sequence: 2, status: stopStatus, reclamoId: 'claim-2',
+            route: { crewId: 'agent-1', status: routeStatus, startedAt: new Date('2026-10-13T08:00:00Z'), plan: { status: 'confirmed' } },
           }),
         },
         $transaction: jest.fn((callback: (transaction: typeof tx) => Promise<unknown>) => callback(tx)),
       };
-      return { service: createService(prisma), prisma, tx };
+      return { service: createService(prisma, natsClient), prisma, tx };
     }
 
     const intervention = {
@@ -209,6 +214,48 @@ describe('RoutingService', () => {
     it('does not let another agent execute the route', async () => {
       const { service } = executionService();
       await expect(service.registerIntervention({ ...intervention, actorId: 'agent-2' })).rejects.toThrow('no pertenece a la ruta');
+    });
+
+    it.each(['resuelto', 'no_resuelto', 'requiere_nueva_visita', 'no_corresponde'] as const)(
+      'closes the second and last stop with result %s using the real lifecycle',
+      async (result) => {
+        const natsClient = { send: jest.fn().mockReturnValue(of({ status: 'updated' })) };
+        const { service, tx } = executionService('in_progress', 'pendiente', natsClient);
+        tx.routingStop.count.mockResolvedValueOnce(0).mockResolvedValueOnce(0);
+        await expect(service.registerIntervention({ ...intervention, result })).resolves.toMatchObject({ status: 'ok' });
+        expect(tx.routingRoute.update).toHaveBeenCalledWith({
+          where: { id: 'route-1' },
+          data: expect.objectContaining({ status: 'completed', startedAt: new Date('2026-10-13T08:00:00Z'), completedAt: expect.any(Date) }),
+        });
+        expect(natsClient.send).toHaveBeenCalledWith('reclamos.update', expect.objectContaining({ id: 'claim-2' }));
+      },
+    );
+
+    it('keeps the route in progress when stops remain after the second job', async () => {
+      const { service, tx } = executionService();
+      tx.routingStop.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+      await expect(service.registerIntervention(intervention)).resolves.toMatchObject({ status: 'ok' });
+      expect(tx.routingRoute.update).not.toHaveBeenCalled();
+    });
+
+    it('reports saved work explicitly when claim synchronization fails', async () => {
+      const failure = new Error('reclamos.update failed');
+      const natsClient = { send: jest.fn().mockReturnValue(throwError(() => failure)) };
+      const { service, tx } = executionService('in_progress', 'pendiente', natsClient);
+      const response = service.registerIntervention(intervention).catch((error: unknown) => {
+        expect(error).toBeInstanceOf(RpcException);
+        return (error as RpcException).getError();
+      });
+      await expect(response).resolves.toEqual({
+        statusCode: HttpStatus.BAD_GATEWAY,
+        message: 'El trabajo fue registrado, pero fallo la sincronizacion del reclamo.',
+        interventionSaved: true,
+        interventionId: 'intervention-1',
+        routeId: 'route-1',
+        stopId: 'stop-2',
+      });
+      expect(tx.routingIntervention.upsert).toHaveBeenCalled();
+      expect(tx.routingRoute.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'completed' }) }));
     });
   });
 
