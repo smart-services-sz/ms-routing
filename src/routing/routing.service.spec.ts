@@ -130,6 +130,88 @@ function createPrismaMock(tx = createTransactionMock()): PrismaMock {
 }
 
 describe('RoutingService', () => {
+  describe('agent execution', () => {
+    function executionService(routeStatus = 'in_progress', stopStatus = 'pendiente') {
+      const tx = {
+        ...createTransactionMock(),
+        routingStop: {
+          count: jest.fn().mockResolvedValue(0),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+          update: jest.fn().mockResolvedValue({}),
+        },
+        routingIntervention: { upsert: jest.fn().mockResolvedValue({ id: 'intervention-1' }) },
+        routingRoute: { update: jest.fn().mockResolvedValue({}) },
+      };
+      const prisma = {
+        ...createPrismaMock(),
+        routingRoute: {
+          findMany: jest.fn().mockResolvedValue([]),
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'route-1', crewId: 'agent-1', status: routeStatus,
+            startedAt: null, plan: { status: 'confirmed' },
+          }),
+        },
+        routingStop: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'stop-2', routeId: 'route-1', sequence: 2, status: stopStatus,
+            route: { crewId: 'agent-1', status: routeStatus, plan: { status: 'confirmed' } },
+          }),
+        },
+        $transaction: jest.fn((callback: (transaction: typeof tx) => Promise<unknown>) => callback(tx)),
+      };
+      return { service: createService(prisma), prisma, tx };
+    }
+
+    const intervention = {
+      routeId: 'route-1', stopId: 'stop-2', result: 'resuelto' as const,
+      actorId: 'agent-1', actorIsAdmin: false,
+    };
+
+    it('lists only the operator routes from confirmed plans', async () => {
+      const { service, prisma } = executionService();
+      expect(await service.getAssignedRoutes({ userId: 'agent-1' })).toEqual({ status: 'ok', data: [] });
+      expect(prisma.routingRoute.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { crewId: 'agent-1', status: { in: ['assigned', 'in_progress', 'completed'] }, plan: { status: 'confirmed' } },
+      }));
+    });
+
+    it('rejects work before the route starts', async () => {
+      const { service, prisma } = executionService('assigned');
+      await expect(service.registerIntervention(intervention)).rejects.toThrow('Debe comenzar la ruta');
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects a stop when an earlier stop is still pending', async () => {
+      const { service, tx } = executionService();
+      tx.routingStop.count.mockResolvedValue(1);
+      await expect(service.registerIntervention(intervention)).rejects.toThrow('trabajos anteriores en orden');
+      expect(tx.routingIntervention.upsert).not.toHaveBeenCalled();
+      expect(tx.routingStop.count).toHaveBeenCalledWith({ where: { routeId: 'route-1', status: 'pendiente', sequence: { lt: 2 } } });
+    });
+
+    it('rejects already registered work', async () => {
+      const { service } = executionService('in_progress', 'resuelto');
+      await expect(service.registerIntervention(intervention)).rejects.toThrow('trabajo pendiente');
+    });
+
+    it('rejects concurrent duplicate registration', async () => {
+      const { service, tx } = executionService();
+      tx.routingStop.updateMany.mockResolvedValue({ count: 0 });
+      await expect(service.registerIntervention(intervention)).rejects.toThrow('ya fue registrado');
+      expect(tx.routingIntervention.upsert).not.toHaveBeenCalled();
+    });
+
+    it('does not let an agent manually complete an unfinished route', async () => {
+      const { service } = executionService();
+      await expect(service.updateRouteStatus({ routeId: 'route-1', status: 'completed', actorId: 'agent-1' })).rejects.toThrow('Solo puede comenzar');
+    });
+
+    it('does not let another agent execute the route', async () => {
+      const { service } = executionService();
+      await expect(service.registerIntervention({ ...intervention, actorId: 'agent-2' })).rejects.toThrow('no pertenece a la ruta');
+    });
+  });
+
   describe('simulate claim filters', () => {
     it('sends supported filters to reclamos and applies local filtering as a guard', async () => {
       const prisma = createPrismaMock();

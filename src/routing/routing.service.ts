@@ -619,6 +619,40 @@ export class RoutingService {
     };
   }
 
+  async getAssignedRoutes(payload: GetAssignedRouteDto) {
+    const assigneeId = payload.userId ?? payload.crewId;
+    if (!assigneeId) {
+      throw new HttpException('Debe enviar userId o crewId', HttpStatus.BAD_REQUEST);
+    }
+
+    const routes = await this.prisma.routingRoute.findMany({
+      where: {
+        crewId: assigneeId,
+        status: { in: ['assigned', 'in_progress', 'completed'] },
+        plan: {
+          status: 'confirmed',
+          ...(payload.planningDate
+            ? { planningDate: new Date(`${payload.planningDate}T00:00:00.000Z`) }
+            : {}),
+        },
+      },
+      include: {
+        plan: { select: { id: true, planningDate: true, status: true } },
+        stops: {
+          orderBy: { sequence: 'asc' },
+          include: {
+            intervention: {
+              include: { evidences: { orderBy: { createdAt: 'asc' } } },
+            },
+          },
+        },
+      },
+      orderBy: [{ plan: { planningDate: 'desc' } }, { createdAt: 'desc' }],
+    });
+
+    return { status: 'ok', data: routes };
+  }
+
   async getAssignedRoute(payload: GetAssignedRouteDto) {
     const assigneeId = payload.userId ?? payload.crewId;
     if (!assigneeId) {
@@ -685,6 +719,7 @@ export class RoutingService {
         crewId: true,
         status: true,
         startedAt: true,
+        plan: { select: { status: true } },
       },
     });
 
@@ -701,6 +736,17 @@ export class RoutingService {
     }
 
     const now = new Date();
+    if (!payload.actorIsAdmin && (
+      payload.status !== 'in_progress' ||
+      route.status !== 'assigned' ||
+      route.plan.status !== 'confirmed'
+    )) {
+      throw new HttpException(
+        'Solo puede comenzar una ruta asignada de un plan confirmado',
+        HttpStatus.CONFLICT,
+      );
+    }
+
     const data = this.routeLifecycleContext.transition({
       currentStatus: route.status as RoutingRouteStatus,
       targetStatus: payload.status,
@@ -732,7 +778,7 @@ export class RoutingService {
     const stop = await this.prisma.routingStop.findUnique({
       where: { id: payload.stopId },
       include: {
-        route: true,
+        route: { include: { plan: { select: { status: true } } } },
       },
     });
 
@@ -758,6 +804,17 @@ export class RoutingService {
       throw new ForbiddenException('El actor no pertenece a la ruta indicada');
     }
 
+    if (!payload.actorIsAdmin && (
+      stop.route.status !== 'in_progress' ||
+      stop.route.plan.status !== 'confirmed' ||
+      stop.status !== 'pendiente'
+    )) {
+      throw new HttpException(
+        'Debe comenzar la ruta y seleccionar un trabajo pendiente',
+        HttpStatus.CONFLICT,
+      );
+    }
+
     const now = new Date();
     const nextStopStatus = this.resolveStopStatusByIntervention(payload.result);
     const nextClaimStatus = this.resolveClaimStatusByIntervention(
@@ -765,6 +822,29 @@ export class RoutingService {
     );
 
     const intervention = await this.prisma.$transaction(async (tx) => {
+      if (!payload.actorIsAdmin) {
+        const earlierPendingStops = await tx.routingStop.count({
+          where: {
+            routeId: stop.routeId,
+            status: 'pendiente',
+            sequence: { lt: stop.sequence },
+          },
+        });
+        if (earlierPendingStops > 0) {
+          throw new HttpException(
+            'Debe cerrar los trabajos anteriores en orden',
+            HttpStatus.CONFLICT,
+          );
+        }
+        const claimed = await tx.routingStop.updateMany({
+          where: { id: stop.id, status: 'pendiente' },
+          data: { status: nextStopStatus, visitedAt: now },
+        });
+        if (claimed.count !== 1) {
+          throw new HttpException('El trabajo ya fue registrado', HttpStatus.CONFLICT);
+        }
+      }
+
       const updatedIntervention = await tx.routingIntervention.upsert({
         where: { stopId: payload.stopId },
         create: {

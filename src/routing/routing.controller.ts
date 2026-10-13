@@ -80,6 +80,11 @@ export class RoutingController {
     return this.routingService.getAssignedRoute(payload);
   }
 
+  @MessagePattern('routing.assigned-routes.list')
+  getAssignedRoutes(@Payload() payload: GetAssignedRouteDto) {
+    return this.routingService.getAssignedRoutes(payload);
+  }
+
   @MessagePattern('routing.route.status.update')
   updateRouteStatus(@Payload() payload: UpdateRouteStatusDto) {
     return this.routingService.updateRouteStatus(payload);
