@@ -1003,7 +1003,7 @@ export class RoutingService {
           interventionId: payload.interventionId,
           tipo: payload.tipo,
           nombreArchivo: payload.nombreArchivo,
-          urlArchivo: payload.urlArchivo,
+          urlArchivo: payload.objectKey,
           descripcion: payload.descripcion,
         },
       });
@@ -1761,7 +1761,7 @@ export class RoutingService {
   ): Promise<void> {
     const observation =
       `Evidencia adjuntada (${payload.tipo}) - ${payload.nombreArchivo} - ` +
-      `${payload.urlArchivo} - ${createdAt.toISOString()}`;
+      `${createdAt.toISOString()}`;
 
     await firstValueFrom(
       this.natsClient

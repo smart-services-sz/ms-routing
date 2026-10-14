@@ -4,7 +4,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
-  IsUrl,
+  Matches,
   MaxLength,
 } from 'class-validator';
 
@@ -19,8 +19,11 @@ export class AttachInterventionEvidenceDto {
   @MaxLength(255)
   nombreArchivo!: string;
 
-  @IsUrl()
-  urlArchivo!: string;
+  @IsString()
+  @Matches(
+    /^evidencias\/[a-zA-Z0-9_-]+\/[0-9a-f-]+\/[0-9a-f-]+\.(?:jpg|png|webp|mp4|pdf)$/i,
+  )
+  objectKey!: string;
 
   @IsOptional()
   @IsString()
