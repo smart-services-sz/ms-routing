@@ -8,7 +8,9 @@ import {
   MaxLength,
 } from 'class-validator';
 
-export class AttachInterventionEvidenceDto {
+import { RoutingMunicipalityScopeDto } from './routing-municipality-scope.dto';
+
+export class AttachInterventionEvidenceDto extends RoutingMunicipalityScopeDto {
   @IsUUID('4')
   interventionId!: string;
 

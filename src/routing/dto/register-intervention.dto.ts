@@ -7,7 +7,9 @@ import {
   MaxLength,
 } from 'class-validator';
 
-export class RegisterInterventionDto {
+import { RoutingMunicipalityScopeDto } from './routing-municipality-scope.dto';
+
+export class RegisterInterventionDto extends RoutingMunicipalityScopeDto {
   @IsUUID('4')
   routeId!: string;
 

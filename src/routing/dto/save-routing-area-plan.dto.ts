@@ -9,7 +9,9 @@ import {
   Min,
 } from 'class-validator';
 
-export class SaveRoutingAreaPlanDto {
+import { RoutingMunicipalityScopeDto } from './routing-municipality-scope.dto';
+
+export class SaveRoutingAreaPlanDto extends RoutingMunicipalityScopeDto {
   @IsOptional()
   @IsString()
   id?: string;

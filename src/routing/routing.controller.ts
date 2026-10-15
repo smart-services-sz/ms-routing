@@ -10,6 +10,7 @@ import { GetAssignedRouteDto } from './dto/get-assigned-route.dto';
 import { UpdateRouteStatusDto } from './dto/update-route-status.dto';
 import { RegisterInterventionDto } from './dto/register-intervention.dto';
 import { AttachInterventionEvidenceDto } from './dto/attach-intervention-evidence.dto';
+import { RoutingMunicipalityScopeDto } from './dto/routing-municipality-scope.dto';
 
 @Controller()
 export class RoutingController {
@@ -27,42 +28,42 @@ export class RoutingController {
 
   @MessagePattern('routing.rules.upsert')
   upsertRules(@Payload() payload: UpsertRoutingRulesDto) {
-    return this.routingService.upsertRules(payload);
+    return this.routingService.upsertRules(payload, payload.municipalityId);
   }
 
   @MessagePattern('routing.rules.get')
-  getRules() {
-    return this.routingService.getRules();
+  getRules(@Payload() payload: RoutingMunicipalityScopeDto) {
+    return this.routingService.getRules(payload?.municipalityId);
   }
 
   @MessagePattern('routing.plan.get')
   getPlan(@Payload() payload: RoutingPlanIdDto) {
-    return this.routingService.getPlan(payload.id);
+    return this.routingService.getPlan(payload.id, payload.municipalityId);
   }
 
   @MessagePattern('routing.plans.list')
-  listPlans() {
-    return this.routingService.listPlans();
+  listPlans(@Payload() payload: RoutingMunicipalityScopeDto) {
+    return this.routingService.listPlans(payload?.municipalityId);
   }
 
   @MessagePattern('routing.plan.confirm')
   confirmPlan(@Payload() payload: RoutingPlanIdDto) {
-    return this.routingService.confirmPlan(payload.id);
+    return this.routingService.confirmPlan(payload.id, payload.municipalityId);
   }
 
   @MessagePattern('routing.plan.delete')
   deletePlan(@Payload() payload: RoutingPlanIdDto) {
-    return this.routingService.deletePlan(payload.id);
+    return this.routingService.deletePlan(payload.id, payload.municipalityId);
   }
 
   @MessagePattern('routing.area-plans.list')
-  listAreaPlans() {
-    return this.routingService.listAreaPlans();
+  listAreaPlans(@Payload() payload: RoutingMunicipalityScopeDto) {
+    return this.routingService.listAreaPlans(payload?.municipalityId);
   }
 
   @MessagePattern('routing.area-plans.get')
   getAreaPlan(@Payload() payload: RoutingAreaPlanIdDto) {
-    return this.routingService.getAreaPlan(payload.id);
+    return this.routingService.getAreaPlan(payload.id, payload.municipalityId);
   }
 
   @MessagePattern('routing.area-plans.save')
@@ -72,7 +73,7 @@ export class RoutingController {
 
   @MessagePattern('routing.area-plans.delete')
   deleteAreaPlan(@Payload() payload: RoutingAreaPlanIdDto) {
-    return this.routingService.deleteAreaPlan(payload.id);
+    return this.routingService.deleteAreaPlan(payload.id, payload.municipalityId);
   }
 
   @MessagePattern('routing.assigned-route.get')

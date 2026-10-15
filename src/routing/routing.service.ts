@@ -123,7 +123,15 @@ export class RoutingService {
     private readonly routeLifecycleContext: RouteLifecycleContext,
   ) {}
 
-  async upsertRules(payload: UpsertRoutingRulesDto) {
+  private requireMunicipality(value?: string): string {
+    if (!value || !/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(value)) {
+      throw new ForbiddenException('Debe indicar un municipio valido para operar rutas');
+    }
+    return value;
+  }
+
+  async upsertRules(payload: UpsertRoutingRulesDto, scope?: string) {
+    const municipalityId = this.requireMunicipality(scope);
     const normalizedCrews = payload.crews.map((crew) => {
       const assigneeId = crew.userId ?? crew.crewId;
       if (!assigneeId) {
@@ -134,6 +142,7 @@ export class RoutingService {
       }
 
       return {
+        municipalityId,
         crewId: assigneeId,
         nombre: crew.userName ?? crew.nombre ?? assigneeId,
         maxReclamosDiarios: Math.min(
@@ -148,13 +157,14 @@ export class RoutingService {
     });
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.routingCategoryRule.deleteMany();
-      await tx.routingCrewRule.deleteMany();
-      await tx.routingZoneRule.deleteMany();
+      await tx.routingCategoryRule.deleteMany({ where: { municipalityId } });
+      await tx.routingCrewRule.deleteMany({ where: { municipalityId } });
+      await tx.routingZoneRule.deleteMany({ where: { municipalityId } });
 
       if (payload.categoryRules.length > 0) {
         await tx.routingCategoryRule.createMany({
           data: payload.categoryRules.map((rule) => ({
+            municipalityId,
             categoria: rule.categoria,
             cupoDiario: rule.cupoDiario,
             pesoPrioridad: rule.pesoPrioridad ?? 1,
@@ -171,6 +181,7 @@ export class RoutingService {
       if ((payload.zones ?? []).length > 0) {
         await tx.routingZoneRule.createMany({
           data: (payload.zones ?? []).map((zone) => ({
+            municipalityId,
             id: zone.id,
             nombre: zone.nombre,
             minLat: zone.minLat,
@@ -185,13 +196,15 @@ export class RoutingService {
     return { status: 'ok', message: 'Reglas de ruteo actualizadas' };
   }
 
-  async getRules(): Promise<{ status: 'ok'; data: RoutingRulesSnapshot }> {
+  async getRules(scope?: string): Promise<{ status: 'ok'; data: RoutingRulesSnapshot }> {
+    const municipalityId = this.requireMunicipality(scope);
     const [categoryRules, crews, zones] = await Promise.all([
       this.prisma.routingCategoryRule.findMany({
+        where: { municipalityId },
         orderBy: { categoria: 'asc' },
       }),
-      this.prisma.routingCrewRule.findMany({ orderBy: { crewId: 'asc' } }),
-      this.prisma.routingZoneRule.findMany({ orderBy: { id: 'asc' } }),
+      this.prisma.routingCrewRule.findMany({ where: { municipalityId }, orderBy: { crewId: 'asc' } }),
+      this.prisma.routingZoneRule.findMany({ where: { municipalityId }, orderBy: { id: 'asc' } }),
     ]);
 
     return {
@@ -213,7 +226,10 @@ export class RoutingService {
           startLat: c.startLat,
           startLng: c.startLng,
         })),
-        zones,
+        zones: zones.map((zone) => ({
+          id: zone.id, nombre: zone.nombre, minLat: zone.minLat,
+          maxLat: zone.maxLat, minLng: zone.minLng, maxLng: zone.maxLng,
+        })),
       },
     };
   }
@@ -226,12 +242,13 @@ export class RoutingService {
   }
 
   async generate(payload: SimulateRoutingDto) {
+    const municipalityId = this.requireMunicipality(payload.municipalityId);
     const idempotencyKey = payload.idempotencyKey ?? null;
 
     // --- Idempotency check ---
     if (idempotencyKey) {
       const existing = await this.prisma.routingGenerationRequest.findUnique({
-        where: { idempotencyKey },
+        where: { municipalityId_idempotencyKey: { municipalityId, idempotencyKey } },
       });
       if (existing) {
         if (existing.status === 'completed' && existing.response) {
@@ -250,8 +267,8 @@ export class RoutingService {
     // --- Mark as processing ---
     const requestRecord = idempotencyKey
       ? await this.prisma.routingGenerationRequest.upsert({
-          where: { idempotencyKey },
-          create: { idempotencyKey, status: 'processing' },
+          where: { municipalityId_idempotencyKey: { municipalityId, idempotencyKey } },
+          create: { municipalityId, idempotencyKey, status: 'processing' },
           update: { status: 'processing', response: undefined },
         })
       : null;
@@ -268,7 +285,7 @@ export class RoutingService {
 
       if (requestRecord && idempotencyKey) {
         await this.prisma.routingGenerationRequest.update({
-          where: { idempotencyKey },
+          where: { municipalityId_idempotencyKey: { municipalityId, idempotencyKey } },
           data: {
             status: 'completed',
             response: result as unknown as Prisma.InputJsonValue,
@@ -282,7 +299,7 @@ export class RoutingService {
       if (requestRecord && idempotencyKey) {
         await this.prisma.routingGenerationRequest
           .update({
-            where: { idempotencyKey },
+            where: { municipalityId_idempotencyKey: { municipalityId, idempotencyKey } },
             data: { status: 'failed' },
           })
           .catch(() => {
@@ -293,10 +310,10 @@ export class RoutingService {
     }
   }
 
-  async getPlan(id: string) {
-    const [plan, actionHistory] = await Promise.all([
-      this.prisma.routingPlan.findUnique({
-        where: { id },
+  async getPlan(id: string, scope?: string) {
+    const municipalityId = this.requireMunicipality(scope);
+    const plan = await this.prisma.routingPlan.findUnique({
+        where: { id, municipalityId },
         include: {
           routes: {
             include: {
@@ -316,12 +333,7 @@ export class RoutingService {
           },
           unassigned: true,
         },
-      }),
-      this.prisma.routingActionHistory.findMany({
-        where: { planId: id },
-        orderBy: { createdAt: 'asc' },
-      }),
-    ]);
+      });
 
     if (!plan) {
       throw new HttpException(
@@ -329,6 +341,10 @@ export class RoutingService {
         HttpStatus.NOT_FOUND,
       );
     }
+
+    const actionHistory = await this.prisma.routingActionHistory.findMany({
+      where: { planId: id }, orderBy: { createdAt: 'asc' },
+    });
 
     return {
       status: 'ok',
@@ -344,8 +360,10 @@ export class RoutingService {
     };
   }
 
-  async listPlans() {
+  async listPlans(scope?: string) {
+    const municipalityId = this.requireMunicipality(scope);
     const plans = await this.prisma.routingPlan.findMany({
+      where: { municipalityId },
       orderBy: [{ planningDate: 'desc' }, { createdAt: 'desc' }],
       include: {
         routes: {
@@ -385,9 +403,10 @@ export class RoutingService {
     };
   }
 
-  async confirmPlan(id: string) {
+  async confirmPlan(id: string, scope?: string) {
+    const municipalityId = this.requireMunicipality(scope);
     const plan = await this.prisma.routingPlan.findUnique({
-      where: { id },
+      where: { id, municipalityId },
       select: { id: true, status: true },
     });
     if (!plan) {
@@ -405,7 +424,7 @@ export class RoutingService {
     await this.prisma.$transaction(async (tx) => {
       // 1. Confirm plan + routes
       await tx.routingPlan.update({
-        where: { id },
+        where: { id, municipalityId },
         data: { status: 'confirmed' },
       });
       await tx.routingRoute.updateMany({
@@ -472,9 +491,10 @@ export class RoutingService {
     return { status: 'ok', message: 'Plan confirmado correctamente' };
   }
 
-  async deletePlan(id: string) {
+  async deletePlan(id: string, scope?: string) {
+    const municipalityId = this.requireMunicipality(scope);
     const exists = await this.prisma.routingPlan.findUnique({
-      where: { id },
+      where: { id, municipalityId },
       select: { id: true },
     });
     if (!exists) {
@@ -496,7 +516,7 @@ export class RoutingService {
           expiresAt: null,
         },
       });
-      await tx.routingPlan.delete({ where: { id } });
+      await tx.routingPlan.delete({ where: { id, municipalityId } });
     });
 
     return {
@@ -505,8 +525,10 @@ export class RoutingService {
     };
   }
 
-  async listAreaPlans() {
+  async listAreaPlans(scope?: string) {
+    const municipalityId = this.requireMunicipality(scope);
     const plans = await this.prisma.routingAreaPlan.findMany({
+      where: { municipalityId },
       orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
     });
 
@@ -516,9 +538,10 @@ export class RoutingService {
     };
   }
 
-  async getAreaPlan(id: string) {
+  async getAreaPlan(id: string, scope?: string) {
+    const municipalityId = this.requireMunicipality(scope);
     const plan = await this.prisma.routingAreaPlan.findUnique({
-      where: { id },
+      where: { id, municipalityId },
     });
     if (!plan) {
       throw new HttpException(
@@ -534,64 +557,19 @@ export class RoutingService {
   }
 
   async saveAreaPlan(payload: SaveRoutingAreaPlanDto) {
+    const municipalityId = this.requireMunicipality(payload.municipalityId);
+    if (payload.id) await this.getAreaPlan(payload.id, municipalityId);
+    const data = {
+      municipalityId, name: payload.name, userId: payload.userId,
+      userName: payload.userName, categorias: payload.categorias,
+      originAddress: payload.originAddress, originLat: payload.originLat,
+      originLng: payload.originLng,
+      dailyByUser: Math.min(payload.dailyByUser, this.MAX_CLAIMS_PER_ROUTE),
+      dailyByCategory: Math.min(payload.dailyByCategory, this.MAX_CLAIMS_PER_ROUTE),
+    };
     const saved = payload.id
-      ? await this.prisma.routingAreaPlan.upsert({
-          where: { id: payload.id },
-          update: {
-            name: payload.name,
-            userId: payload.userId,
-            userName: payload.userName,
-            categorias: payload.categorias,
-            originAddress: payload.originAddress,
-            originLat: payload.originLat,
-            originLng: payload.originLng,
-            dailyByUser: Math.min(
-              payload.dailyByUser,
-              this.MAX_CLAIMS_PER_ROUTE,
-            ),
-            dailyByCategory: Math.min(
-              payload.dailyByCategory,
-              this.MAX_CLAIMS_PER_ROUTE,
-            ),
-          },
-          create: {
-            id: payload.id,
-            name: payload.name,
-            userId: payload.userId,
-            userName: payload.userName,
-            categorias: payload.categorias,
-            originAddress: payload.originAddress,
-            originLat: payload.originLat,
-            originLng: payload.originLng,
-            dailyByUser: Math.min(
-              payload.dailyByUser,
-              this.MAX_CLAIMS_PER_ROUTE,
-            ),
-            dailyByCategory: Math.min(
-              payload.dailyByCategory,
-              this.MAX_CLAIMS_PER_ROUTE,
-            ),
-          },
-        })
-      : await this.prisma.routingAreaPlan.create({
-          data: {
-            name: payload.name,
-            userId: payload.userId,
-            userName: payload.userName,
-            categorias: payload.categorias,
-            originAddress: payload.originAddress,
-            originLat: payload.originLat,
-            originLng: payload.originLng,
-            dailyByUser: Math.min(
-              payload.dailyByUser,
-              this.MAX_CLAIMS_PER_ROUTE,
-            ),
-            dailyByCategory: Math.min(
-              payload.dailyByCategory,
-              this.MAX_CLAIMS_PER_ROUTE,
-            ),
-          },
-        });
+      ? await this.prisma.routingAreaPlan.update({ where: { id: payload.id, municipalityId }, data })
+      : await this.prisma.routingAreaPlan.create({ data });
 
     return {
       status: 'ok',
@@ -599,9 +577,10 @@ export class RoutingService {
     };
   }
 
-  async deleteAreaPlan(id: string) {
+  async deleteAreaPlan(id: string, scope?: string) {
+    const municipalityId = this.requireMunicipality(scope);
     const exists = await this.prisma.routingAreaPlan.findUnique({
-      where: { id },
+      where: { id, municipalityId },
       select: { id: true },
     });
     if (!exists) {
@@ -611,7 +590,7 @@ export class RoutingService {
       );
     }
 
-    await this.prisma.routingAreaPlan.delete({ where: { id } });
+    await this.prisma.routingAreaPlan.delete({ where: { id, municipalityId } });
 
     return {
       status: 'ok',
@@ -620,6 +599,7 @@ export class RoutingService {
   }
 
   async getAssignedRoutes(payload: GetAssignedRouteDto) {
+    const municipalityId = this.requireMunicipality(payload.municipalityId);
     const assigneeId = payload.userId ?? payload.crewId;
     if (!assigneeId) {
       throw new HttpException('Debe enviar userId o crewId', HttpStatus.BAD_REQUEST);
@@ -630,6 +610,7 @@ export class RoutingService {
         crewId: assigneeId,
         status: { in: ['assigned', 'in_progress', 'completed'] },
         plan: {
+          municipalityId,
           status: 'confirmed',
           ...(payload.planningDate
             ? { planningDate: new Date(`${payload.planningDate}T00:00:00.000Z`) }
@@ -654,6 +635,7 @@ export class RoutingService {
   }
 
   async getAssignedRoute(payload: GetAssignedRouteDto) {
+    const municipalityId = this.requireMunicipality(payload.municipalityId);
     const assigneeId = payload.userId ?? payload.crewId;
     if (!assigneeId) {
       throw new HttpException(
@@ -668,11 +650,11 @@ export class RoutingService {
         status: {
           in: ['assigned', 'in_progress'],
         },
-        plan: payload.planningDate
-          ? {
-              planningDate: new Date(`${payload.planningDate}T00:00:00.000Z`),
-            }
-          : undefined,
+        plan: {
+          municipalityId,
+          status: 'confirmed',
+          ...(payload.planningDate ? { planningDate: new Date(`${payload.planningDate}T00:00:00.000Z`) } : {}),
+        },
       },
       include: {
         plan: {
@@ -712,8 +694,9 @@ export class RoutingService {
   }
 
   async updateRouteStatus(payload: UpdateRouteStatusDto) {
+    const municipalityId = this.requireMunicipality(payload.municipalityId);
     const route = await this.prisma.routingRoute.findUnique({
-      where: { id: payload.routeId },
+      where: { id: payload.routeId, plan: { municipalityId } },
       select: {
         id: true,
         crewId: true,
@@ -775,8 +758,9 @@ export class RoutingService {
   }
 
   async registerIntervention(payload: RegisterInterventionDto) {
+    const municipalityId = this.requireMunicipality(payload.municipalityId);
     const stop = await this.prisma.routingStop.findUnique({
-      where: { id: payload.stopId },
+      where: { id: payload.stopId, route: { plan: { municipalityId } } },
       include: {
         route: { include: { plan: { select: { status: true } } } },
       },
@@ -969,8 +953,9 @@ export class RoutingService {
   }
 
   async attachInterventionEvidence(payload: AttachInterventionEvidenceDto) {
+    const municipalityId = this.requireMunicipality(payload.municipalityId);
     const intervention = await this.prisma.routingIntervention.findUnique({
-      where: { id: payload.interventionId },
+      where: { id: payload.interventionId, route: { plan: { municipalityId } } },
       select: {
         id: true,
         reclamoId: true,
@@ -1058,6 +1043,7 @@ export class RoutingService {
     forcePersist: boolean,
     generationRequestId: string | null,
   ) {
+    const municipalityId = this.requireMunicipality(payload.municipalityId);
     const maxFetch = payload.maxFetch ?? 200;
     const planningDate =
       payload.planningDate ?? new Date().toISOString().slice(0, 10);
@@ -1066,7 +1052,7 @@ export class RoutingService {
 
     const rules = payload.overrideRules
       ? this.toRulesSnapshot(payload.overrideRules)
-      : (await this.getRules()).data;
+      : (await this.getRules(municipalityId)).data;
     if (!rules.crews.length || !rules.categoryRules.length) {
       throw new HttpException(
         'No hay reglas de ruteo configuradas (categoryRules/crews)',
@@ -1223,6 +1209,7 @@ export class RoutingService {
         r.stops.map((s) => s.reclamoId),
       );
       const plan = await this.persistPlanWithReservation(
+        municipalityId,
         planningDate,
         summary,
         routes,
@@ -1471,6 +1458,7 @@ export class RoutingService {
   }
 
   private async persistPlanWithReservation(
+    municipalityId: string,
     planningDate: string,
     summary: SimulationSummary,
     routes: Array<{
@@ -1506,6 +1494,7 @@ export class RoutingService {
       // 1. Persist the plan
       const plan = await tx.routingPlan.create({
         data: {
+          municipalityId: this.requireMunicipality(municipalityId),
           planningDate: new Date(`${planningDate}T00:00:00.000Z`),
           status: 'proposed',
           summary: summary as unknown as Prisma.InputJsonValue,
@@ -1619,6 +1608,7 @@ export class RoutingService {
   }
 
   private async persistPlan(
+    municipalityId: string,
     planningDate: string,
     summary: SimulationSummary,
     routes: Array<{
@@ -1646,6 +1636,7 @@ export class RoutingService {
   ) {
     return this.prisma.routingPlan.create({
       data: {
+        municipalityId: this.requireMunicipality(municipalityId),
         planningDate: new Date(`${planningDate}T00:00:00.000Z`),
         status: 'proposed',
         summary: summary as unknown as Prisma.InputJsonValue,
@@ -1741,6 +1732,7 @@ export class RoutingService {
       this.natsClient
         .send('reclamos.update', {
           id: reclamoId,
+          municipalityId: this.requireMunicipality(payload.municipalityId),
           data: {
             estado,
             observaciones: observationText,
@@ -1767,6 +1759,7 @@ export class RoutingService {
       this.natsClient
         .send('reclamos.update', {
           id: reclamoId,
+          municipalityId: this.requireMunicipality(payload.municipalityId),
           data: {
             observaciones: observation,
             actorId: payload.actorId,

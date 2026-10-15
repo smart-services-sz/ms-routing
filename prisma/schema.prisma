@@ -7,17 +7,21 @@ datasource db {
 }
 
 model RoutingCategoryRule {
-  id            String   @id @default(uuid()) @db.Uuid
-  categoria     String   @unique
-  cupoDiario    Int
-  pesoPrioridad Int      @default(1)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id             String   @id @default(uuid()) @db.Uuid
+  municipalityId String?
+  categoria      String
+  cupoDiario     Int
+  pesoPrioridad  Int      @default(1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([municipalityId, categoria])
 }
 
 model RoutingCrewRule {
   id                 String   @id @default(uuid()) @db.Uuid
-  crewId             String   @unique
+  municipalityId     String?
+  crewId             String
   nombre             String?
   maxReclamosDiarios Int
   allowedCategorias  String[]
@@ -26,21 +30,28 @@ model RoutingCrewRule {
   startLng           Float?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+
+  @@unique([municipalityId, crewId])
 }
 
 model RoutingZoneRule {
-  id        String   @id
-  nombre    String?
-  minLat    Float
-  maxLat    Float
-  minLng    Float
-  maxLng    Float
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  key            String   @id @default(uuid()) @db.Uuid
+  id             String
+  municipalityId String?
+  nombre         String?
+  minLat         Float
+  maxLat         Float
+  minLng         Float
+  maxLng         Float
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([municipalityId, id])
 }
 
 model RoutingAreaPlan {
   id              String   @id @default(uuid()) @db.Uuid
+  municipalityId  String?
   name            String
   userId          String
   userName        String?
@@ -54,19 +65,22 @@ model RoutingAreaPlan {
   updatedAt       DateTime @updatedAt
 
   @@index([updatedAt])
+  @@index([municipalityId, updatedAt])
 }
 
 model RoutingPlan {
-  id           String              @id @default(uuid()) @db.Uuid
-  planningDate DateTime
-  status       String              @default("proposed")
-  summary      Json
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
-  routes       RoutingRoute[]
-  unassigned   RoutingUnassigned[]
+  id             String              @id @default(uuid()) @db.Uuid
+  municipalityId String?
+  planningDate   DateTime
+  status         String              @default("proposed")
+  summary        Json
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  routes         RoutingRoute[]
+  unassigned     RoutingUnassigned[]
 
   @@index([planningDate])
+  @@index([municipalityId, planningDate])
 }
 
 model RoutingActionHistory {
@@ -113,7 +127,8 @@ model RoutingClaimAllocation {
 
 model RoutingGenerationRequest {
   id             String    @id @default(uuid()) @db.Uuid
-  idempotencyKey String    @unique
+  municipalityId String?
+  idempotencyKey String
   status         String
   planningDate   DateTime?
   planId         String?   @db.Uuid
@@ -121,6 +136,7 @@ model RoutingGenerationRequest {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
+  @@unique([municipalityId, idempotencyKey])
   @@index([status, updatedAt])
 }
 

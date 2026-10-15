@@ -6,6 +6,9 @@ import { RoutingPlannerContext } from './patterns/strategy/routing-planner.conte
 import { RouteLifecycleContext } from './patterns/state/route-lifecycle.context';
 import { RouteStateFactory } from './patterns/state/route-state.factory';
 import { RoutingService } from './routing.service';
+import { RoutingController as RoutingRpcController } from './routing.controller';
+
+const municipalityId = 'municipio_a';
 
 type GenerationRequestModelMock = {
   findUnique: jest.Mock;
@@ -131,6 +134,149 @@ function createPrismaMock(tx = createTransactionMock()): PrismaMock {
 }
 
 describe('RoutingService', () => {
+  describe('municipal ownership', () => {
+    function scopedService() {
+      const base = createPrismaMock();
+      const date = new Date('2026-10-15T00:00:00Z');
+      const plans = [
+        { id: 'plan-a', municipalityId: 'municipio_a' },
+        { id: 'plan-b', municipalityId: 'municipio_b' },
+        { id: 'legacy', municipalityId: null },
+      ].map((plan) => ({ ...plan, planningDate: date, createdAt: date, updatedAt: date,
+        status: 'proposed', summary: {}, routes: [], unassigned: [], _count: { routes: 0, unassigned: 0 } }));
+      const findMany = () => jest.fn(async ({ where }: { where: { municipalityId: string } }) =>
+        plans.filter((plan) => plan.municipalityId === where.municipalityId));
+      const findUnique = () => jest.fn(async ({ where }: { where: { id: string; municipalityId: string } }) =>
+        plans.find((plan) => plan.id === where.id && plan.municipalityId === where.municipalityId) ?? null);
+      const prisma = {
+        ...base,
+        routingPlan: { ...base.routingPlan, findMany: findMany(), findUnique: findUnique(), delete: jest.fn() },
+        routingAreaPlan: { findMany: findMany(), findUnique: findUnique(), create: jest.fn(), update: jest.fn(), delete: jest.fn() },
+        routingRoute: { findUnique: jest.fn().mockResolvedValue(null), findFirst: jest.fn().mockResolvedValue(null) },
+        routingStop: { findUnique: jest.fn().mockResolvedValue(null) },
+        routingIntervention: { findUnique: jest.fn().mockResolvedValue(null) },
+      };
+      return { service: createService(prisma), prisma };
+    }
+
+    it.each(['municipio_a', 'municipio_b'])('lists only plans belonging to %s, excluding unassigned legacy data', async (scope) => {
+      const { service } = scopedService();
+      const expectedId = scope === 'municipio_a' ? 'plan-a' : 'plan-b';
+      expect((await service.listPlans(scope)).data.map((plan) => plan.id)).toEqual([expectedId]);
+      expect((await service.listAreaPlans(scope)).data.map((plan) => plan.id)).toEqual([expectedId]);
+    });
+
+    it('denies foreign plan detail and history before reading the history', async () => {
+      const { service, prisma } = scopedService();
+      await expect(service.getPlan('plan-b', 'municipio_a')).rejects.toMatchObject({ status: 404 });
+      expect(prisma.routingActionHistory.findMany).not.toHaveBeenCalled();
+      await expect(service.getPlan('plan-a', 'municipio_a')).resolves.toMatchObject({ data: { id: 'plan-a' } });
+    });
+
+    it('rejects confirmation, deletion and area-plan overwrite across municipalities', async () => {
+      const { service, prisma } = scopedService();
+      await expect(service.confirmPlan('plan-b', 'municipio_a')).rejects.toMatchObject({ status: 404 });
+      await expect(service.deletePlan('plan-b', 'municipio_a')).rejects.toMatchObject({ status: 404 });
+      await expect(service.deleteAreaPlan('plan-b', 'municipio_a')).rejects.toMatchObject({ status: 404 });
+      await expect(service.saveAreaPlan({ id: 'plan-b', municipalityId: 'municipio_a' } as never)).rejects.toMatchObject({ status: 404 });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.routingAreaPlan.update).not.toHaveBeenCalled();
+      expect(prisma.routingAreaPlan.create).not.toHaveBeenCalled();
+      expect(prisma.routingAreaPlan.delete).not.toHaveBeenCalled();
+    });
+
+    it('filters direct route, stop and intervention lookups through the owning municipal plan even for admins', async () => {
+      const { service, prisma } = scopedService();
+      await expect(service.getAssignedRoute({ userId: 'agent-1', municipalityId })).rejects.toMatchObject({ status: 404 });
+      await expect(service.updateRouteStatus({ routeId: 'foreign-route', status: 'in_progress', actorIsAdmin: true, municipalityId } as never)).rejects.toMatchObject({ status: 404 });
+      await expect(service.registerIntervention({ routeId: 'foreign-route', stopId: 'foreign-stop', actorIsAdmin: true, municipalityId } as never)).rejects.toMatchObject({ status: 404 });
+      await expect(service.attachInterventionEvidence({ interventionId: 'foreign-intervention', actorIsAdmin: true, municipalityId } as never)).rejects.toMatchObject({ status: 404 });
+      expect(prisma.routingRoute.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'foreign-route', plan: { municipalityId } } }));
+      expect(prisma.routingStop.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'foreign-stop', route: { plan: { municipalityId } } } }));
+      expect(prisma.routingIntervention.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'foreign-intervention', route: { plan: { municipalityId } } } }));
+      expect(prisma.routingRoute.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ crewId: 'agent-1', plan: { municipalityId, status: 'confirmed' } }) }));
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('does not fall back to global operations when a municipality is missing', async () => {
+      const { service, prisma } = scopedService();
+      for (const operation of [
+        () => service.listPlans(), () => service.listAreaPlans(),
+        () => service.getPlan('plan-a'), () => service.confirmPlan('plan-a'),
+        () => service.deletePlan('plan-a'), () => service.getAreaPlan('plan-a'),
+        () => service.deleteAreaPlan('plan-a'), () => service.simulate({}),
+        () => service.generate({ idempotencyKey: 'shared-key' }),
+        () => service.saveAreaPlan({} as never), () => service.getAssignedRoutes({}),
+        () => service.getAssignedRoute({}), () => service.updateRouteStatus({} as never),
+        () => service.registerIntervention({} as never), () => service.attachInterventionEvidence({} as never),
+      ]) await expect(operation()).rejects.toMatchObject({ status: 403 });
+      expect(prisma.routingGenerationRequest.findUnique).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('keeps cached generation responses separate for the same key in different municipalities', async () => {
+      const { service, prisma } = scopedService();
+      prisma.routingGenerationRequest.findUnique.mockImplementation(async ({ where }: { where: { municipalityId_idempotencyKey: { municipalityId: string } } }) => ({
+        status: 'completed', response: { savedPlanId: where.municipalityId_idempotencyKey.municipalityId },
+      }));
+      await expect(service.generate({ municipalityId: 'municipio_a', idempotencyKey: 'shared-key' })).resolves.toEqual({ savedPlanId: 'municipio_a' });
+      await expect(service.generate({ municipalityId: 'municipio_b', idempotencyKey: 'shared-key' })).resolves.toEqual({ savedPlanId: 'municipio_b' });
+      expect(prisma.routingGenerationRequest.findUnique).toHaveBeenNthCalledWith(2, {
+        where: { municipalityId_idempotencyKey: { municipalityId: 'municipio_b', idempotencyKey: 'shared-key' } },
+      });
+    });
+
+    it('preserves municipal scope at the NATS controller boundary', () => {
+      const mocks = { getRules: jest.fn(), listPlans: jest.fn(), listAreaPlans: jest.fn(), getPlan: jest.fn(), getAreaPlan: jest.fn(), confirmPlan: jest.fn(), deletePlan: jest.fn(), deleteAreaPlan: jest.fn(), upsertRules: jest.fn() };
+      const controller = new RoutingRpcController(mocks as unknown as RoutingService);
+      const scope = { municipalityId };
+      const payload = { id: 'plan-a', municipalityId };
+      controller.getRules(scope); controller.listPlans(scope); controller.listAreaPlans(scope);
+      controller.getPlan(payload); controller.getAreaPlan(payload); controller.confirmPlan(payload);
+      controller.deletePlan(payload); controller.deleteAreaPlan(payload);
+      controller.upsertRules({ categoryRules: [], crews: [], municipalityId });
+      for (const method of [mocks.getRules, mocks.listPlans, mocks.listAreaPlans]) expect(method).toHaveBeenCalledWith(municipalityId);
+      for (const method of [mocks.getPlan, mocks.getAreaPlan, mocks.confirmPlan, mocks.deletePlan, mocks.deleteAreaPlan]) expect(method).toHaveBeenCalledWith('plan-a', municipalityId);
+      expect(mocks.upsertRules).toHaveBeenCalledWith(expect.objectContaining({ municipalityId }), municipalityId);
+    });
+  });
+
+  describe('municipal rules', () => {
+    function ruleService() {
+      const models = {
+        routingCategoryRule: { findMany: jest.fn().mockResolvedValue([]), deleteMany: jest.fn(), createMany: jest.fn() },
+        routingCrewRule: { findMany: jest.fn().mockResolvedValue([]), deleteMany: jest.fn(), createMany: jest.fn() },
+        routingZoneRule: { findMany: jest.fn().mockResolvedValue([]), deleteMany: jest.fn(), createMany: jest.fn() },
+      };
+      const prisma = { ...createPrismaMock(), ...models,
+        $transaction: jest.fn((callback: (tx: typeof models) => Promise<unknown>) => callback(models)),
+      };
+      return { service: createService(prisma), models };
+    }
+
+    it('replaces and reads rules only within the selected municipality', async () => {
+      const { service, models } = ruleService();
+      await service.upsertRules({
+        categoryRules: [{ categoria: 'alumbrado', cupoDiario: 2 }],
+        crews: [{ userId: 'agent-1', maxReclamosDiarios: 2, allowedCategorias: ['alumbrado'] }],
+        zones: [{ id: 'centro', minLat: -33, maxLat: -32, minLng: -61, maxLng: -60 }],
+      }, 'municipio_a');
+      await service.getRules('municipio_a');
+      for (const model of Object.values(models)) {
+        expect(model.deleteMany).toHaveBeenCalledWith({ where: { municipalityId: 'municipio_a' } });
+        expect(model.createMany).toHaveBeenCalledWith({ data: [expect.objectContaining({ municipalityId: 'municipio_a' })] });
+        expect(model.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { municipalityId: 'municipio_a' } }));
+      }
+    });
+
+    it('rejects unscoped rule requests before touching the database', async () => {
+      const { service, models } = ruleService();
+      await expect(service.getRules()).rejects.toMatchObject({ status: HttpStatus.FORBIDDEN });
+      await expect(service.upsertRules({ categoryRules: [], crews: [] })).rejects.toMatchObject({ status: HttpStatus.FORBIDDEN });
+      for (const model of Object.values(models)) expect(model.deleteMany).not.toHaveBeenCalled();
+    });
+  });
+
   describe('agent execution', () => {
     function executionService(
       routeStatus = 'in_progress',
@@ -168,15 +314,16 @@ describe('RoutingService', () => {
     }
 
     const intervention = {
+      municipalityId,
       routeId: 'route-1', stopId: 'stop-2', result: 'resuelto' as const,
       actorId: 'agent-1', actorIsAdmin: false,
     };
 
     it('lists only the operator routes from confirmed plans', async () => {
       const { service, prisma } = executionService();
-      expect(await service.getAssignedRoutes({ userId: 'agent-1' })).toEqual({ status: 'ok', data: [] });
+      expect(await service.getAssignedRoutes({ userId: 'agent-1', municipalityId })).toEqual({ status: 'ok', data: [] });
       expect(prisma.routingRoute.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: { crewId: 'agent-1', status: { in: ['assigned', 'in_progress', 'completed'] }, plan: { status: 'confirmed' } },
+        where: { crewId: 'agent-1', status: { in: ['assigned', 'in_progress', 'completed'] }, plan: { municipalityId, status: 'confirmed' } },
       }));
     });
 
@@ -208,7 +355,7 @@ describe('RoutingService', () => {
 
     it('does not let an agent manually complete an unfinished route', async () => {
       const { service } = executionService();
-      await expect(service.updateRouteStatus({ routeId: 'route-1', status: 'completed', actorId: 'agent-1' })).rejects.toThrow('Solo puede comenzar');
+      await expect(service.updateRouteStatus({ routeId: 'route-1', status: 'completed', actorId: 'agent-1', municipalityId })).rejects.toThrow('Solo puede comenzar');
     });
 
     it('does not let another agent execute the route', async () => {
@@ -271,11 +418,21 @@ describe('RoutingService', () => {
                 categoria: 'alumbrado',
                 prioridad: 'alta',
                 estado: 'pendiente',
-                municipalityId: 'ciudad-prueba',
+                municipalityId: 'ciudad_prueba',
                 areaId: 'area-centro',
                 lat: -34.55,
                 lng: -58.45,
                 direccion: 'Calle 1',
+              },
+              {
+                id: 'foreign-claim', categoria: 'alumbrado', prioridad: 'alta',
+                estado: 'pendiente', municipalityId: 'otra_ciudad', areaId: 'area-centro',
+                lat: -34.55, lng: -58.45, direccion: 'Calle 3',
+              },
+              {
+                id: 'legacy-claim', categoria: 'alumbrado', prioridad: 'alta',
+                estado: 'pendiente', municipalityId: null, areaId: 'area-centro',
+                lat: -34.55, lng: -58.45, direccion: 'Calle 4',
               },
               {
                 id: '22222222-2222-4222-8222-222222222222',
@@ -299,7 +456,7 @@ describe('RoutingService', () => {
         claimStatuses: ['pendiente'],
         priorities: ['alta'],
         categories: ['alumbrado'],
-        municipalityId: 'ciudad-prueba',
+        municipalityId: 'ciudad_prueba',
         areaId: 'area-centro',
         overrideRules: {
           categoryRules: [
@@ -323,7 +480,7 @@ describe('RoutingService', () => {
         estado: 'pendiente',
         categoria: 'alumbrado',
         prioridad: 'alta',
-        municipalityId: 'ciudad-prueba',
+        municipalityId: 'ciudad_prueba',
         areaId: 'area-centro',
       });
       expect(result.summary.totalFetched).toBe(1);
@@ -345,6 +502,7 @@ describe('RoutingService', () => {
                 categoria: 'alumbrado',
                 prioridad: 'media',
                 estado: 'pendiente',
+                municipalityId,
                 lat: -34.55,
                 lng: -58.45,
                 direccion: 'Calle 1',
@@ -354,6 +512,7 @@ describe('RoutingService', () => {
                 categoria: 'baches_y_pavimento',
                 prioridad: 'media',
                 estado: 'pendiente',
+                municipalityId,
                 lat: -34.56,
                 lng: -58.46,
                 direccion: 'Calle 2',
@@ -366,6 +525,7 @@ describe('RoutingService', () => {
       const service = createService(prisma, natsClient);
 
       const result = await service.simulate({
+        municipalityId,
         maxFetch: 50,
         useGoogleOptimization: false,
         claimStatuses: ['pendiente'],
@@ -426,7 +586,7 @@ describe('RoutingService', () => {
       const service = createService(prisma);
 
       await expect(
-        service.getPlan('33333333-3333-4333-8333-333333333333'),
+        service.getPlan('33333333-3333-4333-8333-333333333333', municipalityId),
       ).resolves.toMatchObject({
         status: 'ok',
         data: {
@@ -461,7 +621,7 @@ describe('RoutingService', () => {
       const service = createService(prisma);
 
       await expect(
-        service.generate({ idempotencyKey: 'routing-key-1' }),
+        service.generate({ idempotencyKey: 'routing-key-1', municipalityId }),
       ).resolves.toEqual(cachedResponse);
       expect(prisma.routingGenerationRequest.upsert).not.toHaveBeenCalled();
     });
@@ -478,6 +638,7 @@ describe('RoutingService', () => {
                 categoria: 'alumbrado',
                 prioridad: 'alta',
                 estado: 'pendiente',
+                municipalityId,
                 lat: -34.55,
                 lng: -58.45,
                 direccion: 'Calle 1',
@@ -491,6 +652,7 @@ describe('RoutingService', () => {
 
       await expect(
         service.generate({
+          municipalityId,
           maxFetch: 50,
           useGoogleOptimization: false,
           claimStatuses: ['pendiente'],
@@ -526,6 +688,7 @@ describe('RoutingService', () => {
           },
         }) as object,
       });
+      expect(tx.routingPlan.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ municipalityId }) }));
     });
 
     it('rejects a repeated request while the same idempotency key is processing', async () => {
@@ -537,7 +700,7 @@ describe('RoutingService', () => {
       const service = createService(prisma);
 
       await expect(
-        service.generate({ idempotencyKey: 'routing-key-2' }),
+        service.generate({ idempotencyKey: 'routing-key-2', municipalityId }),
       ).rejects.toMatchObject({
         status: HttpStatus.CONFLICT,
       });
@@ -559,6 +722,7 @@ describe('RoutingService', () => {
                 categoria: 'alumbrado',
                 prioridad: 'alta',
                 estado: 'pendiente',
+                municipalityId,
                 lat: -34.55,
                 lng: -58.45,
                 direccion: 'Calle 1',
@@ -572,6 +736,7 @@ describe('RoutingService', () => {
 
       await expect(
         service.generate({
+          municipalityId,
           maxFetch: 50,
           useGoogleOptimization: false,
           claimStatuses: ['pendiente'],
@@ -607,7 +772,7 @@ describe('RoutingService', () => {
       const service = createService(prisma);
 
       await expect(
-        service.confirmPlan('33333333-3333-4333-8333-333333333333'),
+        service.confirmPlan('33333333-3333-4333-8333-333333333333', municipalityId),
       ).resolves.toEqual({
         status: 'ok',
         message: 'Plan ya estaba confirmado',
@@ -621,10 +786,10 @@ describe('RoutingService', () => {
       const service = createService(prisma);
 
       await expect(
-        service.confirmPlan('33333333-3333-4333-8333-333333333333'),
+        service.confirmPlan('33333333-3333-4333-8333-333333333333', municipalityId),
       ).rejects.toBeInstanceOf(HttpException);
       await expect(
-        service.confirmPlan('33333333-3333-4333-8333-333333333333'),
+        service.confirmPlan('33333333-3333-4333-8333-333333333333', municipalityId),
       ).rejects.toMatchObject({
         status: HttpStatus.NOT_FOUND,
       });
@@ -640,14 +805,14 @@ describe('RoutingService', () => {
       const service = createService(prisma);
 
       await expect(
-        service.confirmPlan('33333333-3333-4333-8333-333333333333'),
+        service.confirmPlan('33333333-3333-4333-8333-333333333333', municipalityId),
       ).resolves.toEqual({
         status: 'ok',
         message: 'Plan confirmado correctamente',
       });
 
       expect(tx.routingPlan.update).toHaveBeenCalledWith({
-        where: { id: '33333333-3333-4333-8333-333333333333' },
+        where: { id: '33333333-3333-4333-8333-333333333333', municipalityId },
         data: { status: 'confirmed' },
       });
       expect(tx.routingRoute.updateMany).toHaveBeenCalledWith({

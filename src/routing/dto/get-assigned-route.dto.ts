@@ -1,6 +1,8 @@
 import { IsOptional, IsString } from 'class-validator';
 
-export class GetAssignedRouteDto {
+import { RoutingMunicipalityScopeDto } from './routing-municipality-scope.dto';
+
+export class GetAssignedRouteDto extends RoutingMunicipalityScopeDto {
   @IsOptional()
   @IsString()
   crewId?: string;

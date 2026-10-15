@@ -1,6 +1,8 @@
 import { IsBoolean, IsIn, IsOptional, IsUUID } from 'class-validator';
 
-export class UpdateRouteStatusDto {
+import { RoutingMunicipalityScopeDto } from './routing-municipality-scope.dto';
+
+export class UpdateRouteStatusDto extends RoutingMunicipalityScopeDto {
   @IsUUID('4')
   routeId!: string;
 

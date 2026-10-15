@@ -1,0 +1,2 @@
+/prisma/migrations/20261015130000_align_routing_allocation_generation/migration.sql -text
+/prisma/migrations/20261015140000_add_municipal_routing_scope/migration.sql -text

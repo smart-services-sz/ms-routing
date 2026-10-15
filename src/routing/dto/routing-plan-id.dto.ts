@@ -1,6 +1,8 @@
 import { IsUUID } from 'class-validator';
 
-export class RoutingPlanIdDto {
+import { RoutingMunicipalityScopeDto } from './routing-municipality-scope.dto';
+
+export class RoutingPlanIdDto extends RoutingMunicipalityScopeDto {
   @IsUUID('4')
   id!: string;
 }
