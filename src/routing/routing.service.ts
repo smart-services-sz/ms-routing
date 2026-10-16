@@ -7,7 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ClientProxy, RpcException } from '@nestjs/microservices';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SimulateRoutingDto } from './dto/simulate-routing.dto';
 import { UpsertRoutingRulesDto } from './dto/upsert-routing-rules.dto';
@@ -16,6 +16,7 @@ import { UpdateRouteStatusDto } from './dto/update-route-status.dto';
 import { RegisterInterventionDto } from './dto/register-intervention.dto';
 import { AttachInterventionEvidenceDto } from './dto/attach-intervention-evidence.dto';
 import { SaveRoutingAreaPlanDto } from './dto/save-routing-area-plan.dto';
+import { RoutingMetricsDto } from './dto/routing-metrics.dto';
 import {
   ClaimPrioridad,
   InterventionResult,
@@ -401,6 +402,95 @@ export class RoutingService {
         routes: plan.routes,
       })),
     };
+  }
+
+  async getMetrics(filters: RoutingMetricsDto) {
+    const municipalityId = this.requireMunicipality(filters.municipalityId);
+    const to = filters.to
+      ? this.nextUtcDay(filters.to)
+      : this.nextUtcDay(new Date().toISOString().slice(0, 10));
+    const from = filters.from
+      ? new Date(`${filters.from.slice(0, 10)}T00:00:00.000Z`)
+      : new Date(to.getTime() - (filters.rangeDays ?? 30) * 24 * 60 * 60 * 1000);
+    if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to) {
+      throw new HttpException('El rango de fechas de ruteo no es valido', HttpStatus.BAD_REQUEST);
+    }
+    const rangeMs = to.getTime() - from.getTime();
+    if (rangeMs > 366 * 24 * 60 * 60 * 1000) {
+      throw new HttpException('El rango maximo de metricas es de 366 dias', HttpStatus.BAD_REQUEST);
+    }
+
+    const planWhere: Prisma.RoutingPlanWhereInput = {
+      municipalityId,
+      planningDate: { gte: from, lt: to },
+    };
+    const routeWhere: Prisma.RoutingRouteWhereInput = { plan: planWhere };
+    const [planGroups, routeGroups, stopGroups, stopCategories, interventionGroups, unassignedGroups, evidenceCount, timeline] = await Promise.all([
+      this.prisma.routingPlan.groupBy({ by: ['status'], where: planWhere, _count: { _all: true } }),
+      this.prisma.routingRoute.groupBy({
+        by: ['status'], where: routeWhere, _count: { _all: true },
+        _sum: { assignedClaims: true, totalDistanceKm: true, totalDurationMin: true },
+      }),
+      this.prisma.routingStop.groupBy({ by: ['status'], where: { route: { plan: planWhere } }, _count: { _all: true } }),
+      this.prisma.routingStop.groupBy({ by: ['categoria'], where: { route: { plan: planWhere } }, _count: { _all: true } }),
+      this.prisma.routingIntervention.groupBy({ by: ['result'], where: { route: { plan: planWhere } }, _count: { _all: true } }),
+      this.prisma.routingUnassigned.groupBy({ by: ['reason'], where: { plan: planWhere }, _count: { _all: true } }),
+      this.prisma.routingInterventionEvidence.count({ where: { intervention: { route: { plan: planWhere } } } }),
+      this.prisma.$queryRaw<Array<{ period: Date; plans: number }>>(Prisma.sql`
+        SELECT date_trunc(${filters.bucketDays === 30 ? 'month' : filters.bucketDays === 1 ? 'day' : 'week'}, "planningDate") AS period,
+          COUNT(*)::int AS plans
+        FROM "RoutingPlan"
+        WHERE "municipalityId" = ${municipalityId}
+          AND "planningDate" >= ${from} AND "planningDate" < ${to}
+        GROUP BY period ORDER BY period ASC
+      `),
+    ]);
+
+    const planCounts = Object.fromEntries(planGroups.map((item) => [item.status, item._count._all]));
+    const routeCounts = Object.fromEntries(routeGroups.map((item) => [item.status, item._count._all]));
+    const stopCounts = Object.fromEntries(stopGroups.map((item) => [item.status, item._count._all]));
+    const totalRoutes = routeGroups.reduce((sum, item) => sum + item._count._all, 0);
+    const totalStops = stopGroups.reduce((sum, item) => sum + item._count._all, 0);
+    const pendingStops = stopCounts.pendiente ?? 0;
+    const routeAssigned = routeGroups.reduce((sum, item) => sum + (item._sum.assignedClaims ?? 0), 0);
+
+    return {
+      municipalityId,
+      range: { from: from.toISOString(), to: new Date(to.getTime() - 1).toISOString(), bucketDays: filters.bucketDays ?? 7 },
+      summary: {
+        totalPlans: planGroups.reduce((sum, item) => sum + item._count._all, 0),
+        proposedPlans: planCounts.proposed ?? 0,
+        confirmedPlans: planCounts.confirmed ?? 0,
+        totalRoutes,
+        assignedRoutes: routeCounts.assigned ?? 0,
+        inProgressRoutes: routeCounts.in_progress ?? 0,
+        completedRoutes: routeCounts.completed ?? 0,
+        routeCompletionRate: totalRoutes ? Math.round(((routeCounts.completed ?? 0) / totalRoutes) * 1000) / 10 : 0,
+        assignedClaims: routeAssigned,
+        unassignedClaims: unassignedGroups.reduce((sum, item) => sum + item._count._all, 0),
+        totalStops,
+        pendingStops,
+        completedStops: totalStops - pendingStops,
+        stopCompletionRate: totalStops ? Math.round(((totalStops - pendingStops) / totalStops) * 1000) / 10 : 0,
+        interventions: interventionGroups.reduce((sum, item) => sum + item._count._all, 0),
+        evidences: evidenceCount,
+        totalDistanceKm: Math.round(routeGroups.reduce((sum, item) => sum + (item._sum.totalDistanceKm ?? 0), 0) * 10) / 10,
+        totalDurationMin: routeGroups.reduce((sum, item) => sum + (item._sum.totalDurationMin ?? 0), 0),
+      },
+      byPlanStatus: planGroups.map((item) => ({ name: item.status, total: item._count._all })),
+      byRouteStatus: routeGroups.map((item) => ({ name: item.status, total: item._count._all })),
+      byStopStatus: stopGroups.map((item) => ({ name: item.status, total: item._count._all })),
+      byStopCategory: stopCategories.map((item) => ({ name: item.categoria, total: item._count._all })),
+      byInterventionResult: interventionGroups.map((item) => ({ name: item.result, total: item._count._all })),
+      unassignedByReason: unassignedGroups.map((item) => ({ name: item.reason, total: item._count._all })),
+      timeline: timeline.map((item) => ({ period: item.period.toISOString(), plans: item.plans })),
+    };
+  }
+
+  private nextUtcDay(value: string): Date {
+    const date = new Date(`${value.slice(0, 10)}T00:00:00.000Z`);
+    date.setUTCDate(date.getUTCDate() + 1);
+    return date;
   }
 
   async confirmPlan(id: string, scope?: string) {

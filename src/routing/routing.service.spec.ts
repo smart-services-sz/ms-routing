@@ -150,11 +150,14 @@ describe('RoutingService', () => {
         plans.find((plan) => plan.id === where.id && plan.municipalityId === where.municipalityId) ?? null);
       const prisma = {
         ...base,
-        routingPlan: { ...base.routingPlan, findMany: findMany(), findUnique: findUnique(), delete: jest.fn() },
+        routingPlan: { ...base.routingPlan, findMany: findMany(), findUnique: findUnique(), delete: jest.fn(), groupBy: jest.fn().mockResolvedValue([{ status: 'confirmed', _count: { _all: 2 } }]) },
         routingAreaPlan: { findMany: findMany(), findUnique: findUnique(), create: jest.fn(), update: jest.fn(), delete: jest.fn() },
-        routingRoute: { findUnique: jest.fn().mockResolvedValue(null), findFirst: jest.fn().mockResolvedValue(null) },
-        routingStop: { findUnique: jest.fn().mockResolvedValue(null) },
-        routingIntervention: { findUnique: jest.fn().mockResolvedValue(null) },
+        routingRoute: { findUnique: jest.fn().mockResolvedValue(null), findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([{ status: 'completed', _count: { _all: 1 }, _sum: { assignedClaims: 4, totalDistanceKm: 12, totalDurationMin: 45 } }]) },
+        routingStop: { findUnique: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([{ status: 'visitado', categoria: 'alumbrado', _count: { _all: 4 } }]) },
+        routingIntervention: { findUnique: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([{ result: 'resuelto', _count: { _all: 3 } }]) },
+        routingInterventionEvidence: { count: jest.fn().mockResolvedValue(2) },
+        routingUnassigned: { groupBy: jest.fn().mockResolvedValue([{ reason: 'no_eligible_crew', _count: { _all: 1 } }]) },
+        $queryRaw: jest.fn().mockResolvedValue([{ period: new Date('2026-10-15T00:00:00Z'), plans: 2 }]),
       };
       return { service: createService(prisma), prisma };
     }
@@ -164,6 +167,19 @@ describe('RoutingService', () => {
       const expectedId = scope === 'municipio_a' ? 'plan-a' : 'plan-b';
       expect((await service.listPlans(scope)).data.map((plan) => plan.id)).toEqual([expectedId]);
       expect((await service.listAreaPlans(scope)).data.map((plan) => plan.id)).toEqual([expectedId]);
+    });
+
+    it('aggregates plans, routes, stops, interventions and evidence only through the municipal plan', async () => {
+      const { service, prisma } = scopedService();
+      const result = await service.getMetrics({ municipalityId: 'municipio_a', from: '2026-10-01', to: '2026-10-16', bucketDays: 7 });
+      expect(prisma.routingPlan.groupBy).toHaveBeenCalledWith(expect.objectContaining({ where: { municipalityId: 'municipio_a', planningDate: { gte: expect.any(Date), lt: expect.any(Date) } } }));
+      expect(prisma.routingRoute.groupBy).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ plan: expect.objectContaining({ municipalityId: 'municipio_a' }) }) }));
+      expect(prisma.routingStop.groupBy).toHaveBeenCalledWith(expect.objectContaining({ where: { route: { plan: expect.objectContaining({ municipalityId: 'municipio_a' }) } } }));
+      expect(prisma.routingIntervention.groupBy).toHaveBeenCalledWith(expect.objectContaining({ where: { route: { plan: expect.objectContaining({ municipalityId: 'municipio_a' }) } } }));
+      expect(prisma.routingUnassigned.groupBy).toHaveBeenCalledWith(expect.objectContaining({ where: { plan: expect.objectContaining({ municipalityId: 'municipio_a' }) } }));
+      expect(prisma.routingInterventionEvidence.count).toHaveBeenCalledWith({ where: { intervention: { route: { plan: expect.objectContaining({ municipalityId: 'municipio_a' }) } } } });
+      expect(result.summary).toMatchObject({ totalPlans: 2, totalRoutes: 1, assignedClaims: 4, evidences: 2 });
+      expect(JSON.stringify(result)).not.toContain('direccion');
     });
 
     it('denies foreign plan detail and history before reading the history', async () => {

@@ -11,6 +11,7 @@ import { UpdateRouteStatusDto } from './dto/update-route-status.dto';
 import { RegisterInterventionDto } from './dto/register-intervention.dto';
 import { AttachInterventionEvidenceDto } from './dto/attach-intervention-evidence.dto';
 import { RoutingMunicipalityScopeDto } from './dto/routing-municipality-scope.dto';
+import { RoutingMetricsDto } from './dto/routing-metrics.dto';
 
 @Controller()
 export class RoutingController {
@@ -44,6 +45,11 @@ export class RoutingController {
   @MessagePattern('routing.plans.list')
   listPlans(@Payload() payload: RoutingMunicipalityScopeDto) {
     return this.routingService.listPlans(payload?.municipalityId);
+  }
+
+  @MessagePattern('routing.metrics.summary')
+  getMetrics(@Payload() payload: RoutingMetricsDto) {
+    return this.routingService.getMetrics(payload);
   }
 
   @MessagePattern('routing.plan.confirm')
