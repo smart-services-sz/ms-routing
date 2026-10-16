@@ -5,6 +5,7 @@ import { AppModule } from './app.module';
 
 async function bootstrap() {
   const logger = new Logger('MS-ROUTING');
+  const natsConfigured = Boolean(process.env.NATS_SERVERS);
   const natsServer = process.env.NATS_SERVERS || 'nats://localhost:4222';
 
   const app = await NestFactory.createMicroservice(AppModule, {
@@ -27,7 +28,7 @@ async function bootstrap() {
   logger.log(`
   ----------------------------------------
     MS-ROUTING STARTED
-    NATS: ${natsServer}
+    NATS: ${natsConfigured ? 'configured' : 'default'}
     ENV : ${process.env.NODE_ENV}
   ----------------------------------------
   `);
